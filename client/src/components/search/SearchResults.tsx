@@ -99,7 +99,7 @@ export function SearchResults({
 
         <div className="flex items-center gap-1">
           <span className="text-xs text-muted-foreground font-mono">
-            {!isLoading && !error && `${results.length} found`}
+            {isLoading ? "Searching…" : !error && `${results.length} found`}
           </span>
           {onSaveSearch && query.trim() && (
             <Button

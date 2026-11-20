@@ -111,6 +111,13 @@ describe("SearchResults", () => {
     expect(onSelectNote.mock.calls).toEqual([[listed[0].id], [listed[1].id], [listed[1].id]]);
   });
 
+  it("shows Searching… while loading instead of “No matches”", () => {
+    render(<SearchResults query="flat 3504" results={[]} isLoading onSelectNote={() => {}} />);
+
+    expect(screen.getByText("Searching…")).toBeTruthy();
+    expect(screen.queryByText("No matches found")).toBeNull();
+  });
+
   it("shows a failed search with Retry instead of “No matches”", () => {
     const onRetry = vi.fn();
     render(

@@ -239,6 +239,8 @@ export function NoteList({
       search.debouncedQuery === filterText.trim() && search.data ? new Set(search.data.map((r) => r.id)) : null,
     [search.debouncedQuery, search.data, filterText]
   );
+  // Waiting for the full-text search of the current text (including the debounce)
+  const isSearchPending = filterText.trim().length >= 2 && searchHitIds === null && !search.error;
   const availableTags = useMemo(() => tagsProp ?? fetchedTags ?? [], [tagsProp, fetchedTags]);
 
   const localSelection = useNoteSelection();
@@ -506,7 +508,9 @@ export function NoteList({
           <div className="flex items-center gap-1 ml-auto shrink-0">
             {!isLoading && !error && (
               <span className="text-xs text-muted-foreground font-mono mr-0.5">
-                {filteredAndSortedNotes.length} {filteredAndSortedNotes.length === 1 ? "note" : "notes"}
+                {isSearchPending
+                  ? "Searching…"
+                  : `${filteredAndSortedNotes.length} ${filteredAndSortedNotes.length === 1 ? "note" : "notes"}`}
               </span>
             )}
 
@@ -597,7 +601,7 @@ export function NoteList({
               }}
               className="h-8 pl-8 text-xs bg-muted/40 border-border/40 focus-visible:ring-primary/70"
             />
-            {search.isSearching && (
+            {isSearchPending && (
               <Loader2
                 className="absolute right-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 animate-spin text-muted-foreground"
                 aria-label="Searching note contents"
@@ -701,6 +705,14 @@ export function NoteList({
           </div>
         ) : error ? (
           <QueryError message="Couldn't load notes" error={error} onRetry={onRetry} isRetrying={isRetrying} />
+        ) : filteredAndSortedNotes.length === 0 && isSearchPending ? (
+          <div className="flex flex-col items-center justify-center h-64 text-center px-4" role="status">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground mb-3" aria-hidden="true" />
+            <h4 className="text-sm font-semibold text-foreground">Searching…</h4>
+            <p className="text-xs text-muted-foreground mt-1 max-w-[220px] wrap-break-word">
+              Looking for &ldquo;{filterText.trim()}&rdquo; in note text and attachments.
+            </p>
+          </div>
         ) : filteredAndSortedNotes.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 text-center px-4">
             <div className="h-12 w-12 rounded-full bg-muted/50 flex items-center justify-center text-muted-foreground mb-3">

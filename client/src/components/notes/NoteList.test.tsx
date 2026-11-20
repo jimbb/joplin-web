@@ -331,10 +331,21 @@ describe("NoteList filter", () => {
     renderWithProviders(<NoteList notes={makeNotes(3)} notebooks={notebooks} onSelectNote={vi.fn()} />);
 
     fireEvent.change(screen.getByRole("textbox", { name: "Filter this list" }), { target: { value: "flat 3504" } });
-    expect(screen.getByText("0 notes")).toBeTruthy();
+    // No "No matches" while the full-text search is still running
+    expect(screen.getAllByText("Searching…").length).toBeGreaterThan(0);
+    expect(screen.queryByText("No matches")).toBeNull();
 
     await waitFor(() => expect(screen.getByText("1 note")).toBeTruthy());
     expect(screen.getByText("Note 3")).toBeTruthy();
     expect(calls.some((c) => c.path === "/api/search?q=flat+3504")).toBe(true);
+  });
+
+  it("shows No matches once the full-text search finds nothing", async () => {
+    mockFetch((c) => (c.path.startsWith("/api/search") ? jsonResponse([]) : undefined));
+    renderWithProviders(<NoteList notes={makeNotes(3)} notebooks={notebooks} onSelectNote={vi.fn()} />);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Filter this list" }), { target: { value: "zzz" } });
+    await waitFor(() => expect(screen.getByText("No matches")).toBeTruthy());
+    expect(screen.getByText("0 notes")).toBeTruthy();
   });
 });
