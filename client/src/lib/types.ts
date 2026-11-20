@@ -303,6 +303,24 @@ export interface OrganizeJobSummary {
   updatedAt: number;
 }
 
+export type OrganizeFilter = "all" | "very-high" | "high" | "moves";
+
+export type OrganizeSelectionMode = "very-high" | "high";
+
+export interface OrganizeFilterCounts {
+  all: number;
+  veryHigh: number;
+  veryHighUnapplied: number;
+  high: number;
+  highUnapplied: number;
+  moves: number;
+  movesUnapplied: number;
+}
+
+export interface OrganizeTargetsResponse {
+  noteIds: string[];
+}
+
 export interface OrganizeJobResponse {
   id: string;
   status: OrganizeJobStatus;
@@ -311,6 +329,8 @@ export interface OrganizeJobResponse {
   progress: OrganizeJobProgress;
   appliedCount?: number;
   retryableFailedCount?: number;
+  filter?: OrganizeFilter;
+  filterCounts?: OrganizeFilterCounts;
   usage: OrganizeUsage;
   offset: number;
   limit: number;
@@ -338,6 +358,7 @@ export interface OrganizeApplyItemInput {
   notebookId?: string;
   addTags?: string[];
   baseUpdatedTime?: number;
+  useSuggestion?: boolean;
 }
 
 export interface OrganizeApplyResponse {
@@ -354,6 +375,7 @@ export interface OrganizeUndoResponse {
   conflictCount: number;
   errorCount: number;
   canUndo: boolean;
+  remainingCount?: number;
 }
 
 export interface SavedSearch {
