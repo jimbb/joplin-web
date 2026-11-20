@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { Notebook, NoteListItem as NoteListItemType, Tag } from "@/lib/types";
 import { jsonResponse, mockFetch } from "@/test/fetch-mock";
 import { renderWithProviders } from "@/test/render";
@@ -316,5 +316,25 @@ describe("NoteList collection views & favorites", () => {
 
     expect(errorSpy).not.toHaveBeenCalled();
     errorSpy.mockRestore();
+  });
+});
+
+describe("NoteList filter", () => {
+  it("keeps notes the full-text search finds in the body or attachment OCR", async () => {
+    const calls = mockFetch((c) =>
+      c.path.startsWith("/api/search")
+        ? jsonResponse([{ ...makeNotes(3)[2], matches: { inTitle: false, inBody: false, matchedIn: "attachment" } }])
+        : c.path === "/api/tags"
+          ? jsonResponse(tags)
+          : undefined
+    );
+    renderWithProviders(<NoteList notes={makeNotes(3)} notebooks={notebooks} onSelectNote={vi.fn()} />);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Filter this list" }), { target: { value: "flat 3504" } });
+    expect(screen.getByText("0 notes")).toBeTruthy();
+
+    await waitFor(() => expect(screen.getByText("1 note")).toBeTruthy());
+    expect(screen.getByText("Note 3")).toBeTruthy();
+    expect(calls.some((c) => c.path === "/api/search?q=flat+3504")).toBe(true);
   });
 });

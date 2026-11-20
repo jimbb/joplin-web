@@ -47,6 +47,7 @@ import { NotebookPicker } from "@/components/notebooks/NotebookPicker";
 import { TagAutocompleteInput } from "@/components/tags/TagAutocompleteInput";
 import { NoteSelection, SelectionModifiers, useNoteSelection } from "@/hooks/use-note-selection";
 import { BulkUpdateProgress } from "@/hooks/use-mutations";
+import { useSearch } from "@/hooks/use-search";
 import { useTags } from "@/hooks/use-tags";
 
 export const NOTE_LIST_PAGE_SIZE = 100;
@@ -230,6 +231,14 @@ export function NoteList({
   const [tagValue, setTagValue] = useState("");
 
   const { data: fetchedTags } = useTags(tagsProp === undefined && viewMode === "board");
+  // The filter also keeps notes the full-text search finds (body and attachment OCR), not just
+  // title/preview matches; hits from a query older than the current text are ignored
+  const search = useSearch(filterText);
+  const searchHitIds = useMemo(
+    () =>
+      search.debouncedQuery === filterText.trim() && search.data ? new Set(search.data.map((r) => r.id)) : null,
+    [search.debouncedQuery, search.data, filterText]
+  );
   const availableTags = useMemo(() => tagsProp ?? fetchedTags ?? [], [tagsProp, fetchedTags]);
 
   const localSelection = useNoteSelection();
@@ -269,7 +278,8 @@ export function NoteList({
       result = result.filter(
         (n) =>
           n.title.toLowerCase().includes(q) ||
-          (n.preview && n.preview.toLowerCase().includes(q))
+          (n.preview && n.preview.toLowerCase().includes(q)) ||
+          Boolean(searchHitIds?.has(n.id))
       );
     }
 
@@ -284,7 +294,7 @@ export function NoteList({
     });
 
     return result;
-  }, [notes, filterText, sortField, sortOrder]);
+  }, [notes, filterText, searchHitIds, sortField, sortOrder]);
 
   // Once per list (it remounts per notebook/tag), so closing the note doesn't reopen one
   const openedFirst = useRef(false);
@@ -587,6 +597,12 @@ export function NoteList({
               }}
               className="h-8 pl-8 text-xs bg-muted/40 border-border/40 focus-visible:ring-primary/70"
             />
+            {search.isSearching && (
+              <Loader2
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 animate-spin text-muted-foreground"
+                aria-label="Searching note contents"
+              />
+            )}
           </div>
 
           <div

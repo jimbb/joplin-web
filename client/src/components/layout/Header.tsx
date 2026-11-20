@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/use-auth";
 import { SEARCH_SYNTAX_HINT } from "@/lib/ui-constants";
@@ -47,6 +47,12 @@ interface HeaderProps {
   onOpenMobileSearch?: () => void;
 }
 
+/**
+ * Whether the search field had focus when the last header unmounted. Pages other than the note
+ * list hand the query to `/notes?q=` after two characters, which mounts a new header mid-typing.
+ */
+let searchFocusedAtUnmount = false;
+
 export function Header({
   notebookTitle,
   notebookPath,
@@ -66,6 +72,20 @@ export function Header({
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [securityOpen, setSecurityOpen] = useState(false);
+
+  // Keep typing in the new header's search field after such a hand-over. A layout-effect cleanup
+  // runs before the old input leaves the DOM, while it still has focus.
+  useLayoutEffect(() => {
+    const input = searchInputRef.current;
+    if (input && searchFocusedAtUnmount) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+    searchFocusedAtUnmount = false;
+    return () => {
+      searchFocusedAtUnmount = input !== null && document.activeElement === input;
+    };
+  }, []);
 
   // Ctrl+K / Cmd+K focuses the search field (or opens the mobile menu that holds it). In the note
   // editor it inserts a link instead; the editor marks the event as handled then.

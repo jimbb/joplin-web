@@ -837,7 +837,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
       onSearchChange={(q) => {
         setSearchQuery(q);
         if (q.trim().length >= 2) {
-          navigate("/notes");
+          navigate(`/notes?q=${encodeURIComponent(q.trim())}`);
         }
       }}
       readOnly={readOnly}
