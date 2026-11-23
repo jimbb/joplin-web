@@ -448,6 +448,168 @@ describe("TasksPage", () => {
     const scroller = screen.getByTestId("tasks-scroll-container");
     expect(scroller.className).toContain("overflow-x-hidden");
   });
+
+  it("creates, edits, manually assigns, and deletes custom task categories with auto-match rules", async () => {
+    const savedNbId = id("5");
+    const fbNbId = id("6");
+    let customCategories: Array<{
+      id: string;
+      name: string;
+      color: string;
+      rules: Record<string, unknown>;
+      createdAt: number;
+      updatedAt: number;
+    }> = [];
+    let assignments: Record<string, string> = {};
+
+    mockBaseWorkspace((call) => {
+      if (call.path === "/api/notebooks") {
+        return jsonResponse([
+          workNb,
+          {
+            id: savedNbId,
+            title: "Saved items",
+            parentId: "",
+            noteCount: 0,
+            children: [
+              { id: fbNbId, title: "Facebook", parentId: savedNbId, children: [], noteCount: 1 },
+            ],
+          },
+        ]);
+      }
+      if (call.path === "/api/preferences" && call.method === "GET") {
+        return jsonResponse({
+          favoriteNoteIds: [],
+          favoriteNotebookIds: [],
+          savedSearches: [],
+          recentReads: [],
+          scratchpad: "",
+          taskCategories: customCategories,
+          taskCategoryAssignments: assignments,
+          favoriteNotes: [],
+          favoriteNotebooks: [],
+        });
+      }
+      if (call.path === "/api/preferences/task-categories" && call.method === "POST") {
+        const body = call.body as { name: string; color?: string; rules?: Record<string, unknown> };
+        const created = {
+          id: "cat-1",
+          name: body.name,
+          color: body.color ?? "terracotta",
+          rules: body.rules ?? {},
+          createdAt: 100,
+          updatedAt: 100,
+        };
+        customCategories = [...customCategories, created];
+        return jsonResponse(created, 201);
+      }
+      if (call.path === "/api/preferences/task-categories/cat-1" && call.method === "PUT") {
+        const body = call.body as { name?: string; color?: string; rules?: Record<string, unknown> };
+        const updated = {
+          ...customCategories[0],
+          ...(body.name !== undefined ? { name: body.name } : {}),
+          ...(body.color !== undefined ? { color: body.color } : {}),
+          ...(body.rules !== undefined ? { rules: body.rules } : {}),
+          updatedAt: 200,
+        };
+        customCategories = [updated];
+        return jsonResponse(updated);
+      }
+      if (call.path === "/api/preferences/task-categories/assignments" && call.method === "PUT") {
+        const body = call.body as { taskKey: string; categoryId: string | null };
+        const next = { ...assignments };
+        if (body.categoryId) next[body.taskKey] = body.categoryId;
+        else delete next[body.taskKey];
+        assignments = next;
+        return jsonResponse({ taskCategoryAssignments: next });
+      }
+      if (call.path === "/api/preferences/task-categories/cat-1" && call.method === "DELETE") {
+        customCategories = [];
+        assignments = {};
+        return jsonResponse(null, 204);
+      }
+      if (call.path === "/api/tasks") {
+        return jsonResponse({
+          todoNotes: [
+            {
+              id: noteAId,
+              parentId: fbNbId,
+              title: "FB Reel bookmark",
+              notebookTitle: "Facebook",
+              notebookPath: "Saved items / Facebook",
+              sourceUrl: "https://www.facebook.com/reel/123/",
+              todoCompleted: false,
+              todoDue: 0,
+              updatedTime: 3000,
+            },
+          ],
+          inlineTasks: [
+            {
+              noteId: noteCId,
+              parentId: workNb.id,
+              noteTitle: "Launch Plan",
+              notebookTitle: "Work",
+              notebookPath: "Work",
+              text: "Verify DNS",
+              line: 4,
+              column: 1,
+              checked: false,
+              updatedTime: 2000,
+            },
+          ],
+        });
+      }
+      return undefined;
+    });
+
+    renderWithProviders(<TasksPage />, { route: "/tasks" });
+    expect(await screen.findByText("FB Reel bookmark")).toBeTruthy();
+
+    // Create a custom category with an import path prefix rule
+    fireEvent.click(screen.getByRole("button", { name: "New task category" }));
+    fireEvent.change(await screen.findByLabelText("Category name"), {
+      target: { value: "Facebook Bookmarked" },
+    });
+    fireEvent.change(screen.getByLabelText("Import / notebook path prefixes"), {
+      target: { value: "Saved items / Facebook" },
+    });
+    expect(screen.getByText("Matches 1 task currently.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Create category" }));
+
+    // Custom category pill appears with auto-matched count (1) and filters correctly
+    const categoryBar = await screen.findByRole("group", { name: "Task categories" });
+    const fbPill = await within(categoryBar).findByRole("button", {
+      name: /^Facebook Bookmarked \(1\)$/,
+    });
+    fireEvent.click(fbPill);
+    expect(screen.getByText("FB Reel bookmark")).toBeTruthy();
+    expect(screen.queryByText("Verify DNS")).toBeNull();
+
+    // Edit category via Categories popover -> rename
+    fireEvent.click(screen.getByRole("button", { name: "Choose task category" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Facebook Bookmarked" }));
+    fireEvent.change(await screen.findByLabelText("Category name"), {
+      target: { value: "FB Saved" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    const barAfterEdit = await screen.findByRole("group", { name: "Task categories" });
+    expect(
+      await within(barAfterEdit).findByRole("button", { name: /^FB Saved \(1\)$/ })
+    ).toBeTruthy();
+
+    // Delete category via Edit dialog (2-step confirm) and return to All view
+    fireEvent.click(screen.getByRole("button", { name: "Choose task category" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit FB Saved" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
+
+    const barAfterDelete = await screen.findByRole("group", { name: "Task categories" });
+    await waitFor(() =>
+      expect(within(barAfterDelete).queryByRole("button", { name: /^FB Saved/ })).toBeNull()
+    );
+    expect(screen.getByText("Verify DNS")).toBeTruthy();
+  });
 });
 
 describe("HygienePage", () => {

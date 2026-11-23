@@ -260,6 +260,37 @@ test.describe("workspace features", () => {
     await expect(page.getByText("Renew passport")).toBeHidden();
     await page.getByRole("button", { name: "Clear category filter" }).click();
     await expect(page.getByText("Renew passport")).toBeVisible();
+
+    // Create, manually assign, edit, and delete a custom task category with import-path auto-matching
+    await page.getByRole("button", { name: "New task category" }).click();
+    await page.getByLabel("Category name").fill("Project Work");
+    await page.getByLabel("Import / notebook path prefixes").fill("Work / Projects");
+    await page.getByRole("button", { name: "Create category" }).click();
+    const categoryBar = page.getByRole("group", { name: "Task categories" });
+    await expect(categoryBar.getByRole("button", { name: /^Project Work \(2\)$/ })).toBeVisible();
+    await categoryBar.getByRole("button", { name: /^Project Work \(2\)$/ }).click();
+    await expect(page.getByText("Finish component library")).toBeVisible();
+    await expect(page.getByText("Renew passport")).toBeHidden();
+    await page.getByRole("button", { name: "Clear category filter" }).click();
+    await expect(page.getByText("Renew passport")).toBeVisible();
+    // Manually assign "Renew passport" into "Project Work" -> count becomes 3
+    await page.getByRole("button", { name: 'Assign category for "Renew passport"' }).click();
+    await page.getByRole("menuitem", { name: "Project Work" }).click();
+    await expect(categoryBar.getByRole("button", { name: /^Project Work \(3\)$/ })).toBeVisible();
+    // Edit category name
+    await page.getByRole("button", { name: "Choose task category" }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Edit Project Work" }).click();
+    await page.getByLabel("Category name").fill("Roadmap Work");
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await expect(categoryBar.getByRole("button", { name: /^Roadmap Work \(3\)$/ })).toBeVisible();
+    // Delete category
+    await page.getByRole("button", { name: "Choose task category" }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Edit Roadmap Work" }).click();
+    await page.getByRole("button", { name: "Delete" }).click();
+    await page.getByRole("button", { name: "Confirm delete" }).click();
+    await expect(categoryBar.getByRole("button", { name: /^Roadmap Work/ })).toBeHidden();
+    await expect(page.getByText("Renew passport")).toBeVisible();
+
     await page.getByRole("button", { name: "Group" }).click();
     await expect(page.getByRole("button", { name: "Collapse all" })).toBeVisible();
     await page.getByRole("button", { name: "Group" }).click();

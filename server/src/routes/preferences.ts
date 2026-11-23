@@ -104,5 +104,79 @@ export function createPreferencesRouter(defaultStore?: PreferencesStore): Router
     res.status(200).json({ scratchpad: updated.scratchpad });
   });
 
+  /** POST /api/preferences/task-categories */
+  router.post('/task-categories', async (req, res) => {
+    const store = getStore(req);
+    const ownerKey = noteCache.getOwnerKey(req.sessionId!);
+    const { name, color, rules } = (req.body ?? {}) as {
+      name?: string;
+      color?: unknown;
+      rules?: unknown;
+    };
+    const created = await store.addTaskCategory(ownerKey, {
+      name: name ?? '',
+      color: color as never,
+      rules: rules as never,
+    });
+    res.status(201).json(created);
+  });
+
+  /** PUT /api/preferences/task-categories/assignments */
+  router.put('/task-categories/assignments', async (req, res) => {
+    const store = getStore(req);
+    const ownerKey = noteCache.getOwnerKey(req.sessionId!);
+    const { taskKey, categoryId } = (req.body ?? {}) as {
+      taskKey?: unknown;
+      categoryId?: unknown;
+    };
+    if (typeof taskKey !== 'string') {
+      res.status(400).json({ error: 'taskKey is required' });
+      return;
+    }
+    if (categoryId !== null && categoryId !== undefined && typeof categoryId !== 'string') {
+      res.status(400).json({ error: 'categoryId must be a string or null' });
+      return;
+    }
+    const taskCategoryAssignments = await store.setTaskCategoryAssignment(
+      ownerKey,
+      taskKey,
+      categoryId === undefined ? null : categoryId
+    );
+    res.status(200).json({ taskCategoryAssignments });
+  });
+
+  /** PUT /api/preferences/task-categories/:id */
+  router.put('/task-categories/:id', async (req, res) => {
+    const store = getStore(req);
+    const ownerKey = noteCache.getOwnerKey(req.sessionId!);
+    const { name, color, rules } = (req.body ?? {}) as {
+      name?: string;
+      color?: unknown;
+      rules?: unknown;
+    };
+    const updated = await store.updateTaskCategory(ownerKey, req.params.id, {
+      ...(name !== undefined ? { name } : {}),
+      ...(color !== undefined ? { color: color as never } : {}),
+      ...(rules !== undefined ? { rules: rules as never } : {}),
+    });
+    if (!updated) {
+      res.status(404).json({ error: 'Task category not found' });
+      return;
+    }
+    res.status(200).json(updated);
+  });
+
+  /** DELETE /api/preferences/task-categories/:id */
+  router.delete('/task-categories/:id', async (req, res) => {
+    const store = getStore(req);
+    const ownerKey = noteCache.getOwnerKey(req.sessionId!);
+    const removed = await store.removeTaskCategory(ownerKey, req.params.id);
+    if (!removed) {
+      res.status(404).json({ error: 'Task category not found' });
+      return;
+    }
+    res.status(204).end();
+  });
+
   return router;
 }

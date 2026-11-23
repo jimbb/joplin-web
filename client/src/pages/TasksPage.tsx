@@ -16,15 +16,28 @@ import {
   Folder,
   Layers,
   ListChecks,
+  Pencil,
+  Plus,
   Search,
+  Sparkles,
+  Tag as TagIcon,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { QueryError } from "@/components/common/QueryError";
+import { TaskCategoryDialog, type TaskCategoryPrefill } from "@/components/tasks/TaskCategoryDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -32,13 +45,36 @@ import { useConflictNotes } from "@/hooks/use-notes";
 import { useNotebooks } from "@/hooks/use-notebooks";
 import { useUpdateNote } from "@/hooks/use-mutations";
 import { useOrganizeJobs, useOrganizeStatus } from "@/hooks/use-organize";
+import {
+  useCreateTaskCategory,
+  useDeleteTaskCategory,
+  usePreferences,
+  useSetTaskCategoryAssignment,
+  useUpdateTaskCategory,
+} from "@/hooks/use-preferences";
+import { useTags } from "@/hooks/use-tags";
 import { TASKS_QUERY_KEY, useTasks, useToggleInlineTask } from "@/hooks/use-workspace";
 import { useWriteState } from "@/hooks/use-write-state";
 import { ApiError } from "@/lib/api";
 import { formatDueDate, isOverdue } from "@/lib/due";
 import { noteDisplayTitle } from "@/lib/format";
 import { buildNotebookPathMap } from "@/lib/notebooks";
-import type { InlineTaskItem, TodoTaskItem } from "@/lib/types";
+import {
+  buildNotebookLineageMap,
+  customCategoryIdFromKey,
+  customCategoryKey,
+  extractSourceHost,
+  getTaskCategoryColorStyle,
+  isCustomCategoryKey,
+  resolveTaskCustomCategories,
+} from "@/lib/task-categories";
+import type {
+  InlineTaskItem,
+  TaskCategory,
+  TaskCategoryColor,
+  TaskCategoryInput,
+  TodoTaskItem,
+} from "@/lib/types";
 import {
   TASKS_GROUP_BY_CATEGORY_STORAGE_KEY,
   TASKS_HIDDEN_CATEGORIES_STORAGE_KEY,
@@ -50,7 +86,7 @@ type TaskFilter = "open" | "overdue" | "completed" | "inline" | "todos";
 const GROUP_PREFIX = "group:";
 const TASKS_PAGE_SIZE = 100;
 const TASKS_GROUP_PAGE_SIZE = 25;
-const QUICK_CATEGORY_LIMIT = 3;
+const QUICK_CATEGORY_LIMIT = 4;
 
 interface TaskBase {
   key: string;
@@ -59,9 +95,18 @@ interface TaskBase {
   noteTitle: string;
   notebookId: string;
   notebookTitle: string;
-  categoryKey: string;
-  categoryLabel: string;
+  notebookCategoryKey: string;
+  notebookCategoryLabel: string;
   topCategory: string;
+  sourceUrl: string;
+  tagIds: string[];
+  manualCategoryId: string | null;
+  autoMatchedCategoryIds: string[];
+  effectiveCustomCategoryIds: string[];
+  primaryCustomCategory: TaskCategory | null;
+  groupKey: string;
+  groupLabel: string;
+  groupColor?: TaskCategoryColor;
   completed: boolean;
   dueMs: number;
   overdue: boolean;
@@ -78,7 +123,7 @@ type UnifiedTask =
       raw: InlineTaskItem;
     });
 
-interface TaskCategoryInfo {
+interface NotebookCategoryInfo {
   key: string;
   label: string;
   topCategory: string;
@@ -87,7 +132,7 @@ interface TaskCategoryInfo {
   hidden: boolean;
 }
 
-interface TaskCategoryGroupInfo {
+interface NotebookCategoryGroupInfo {
   key: string;
   label: string;
   topCategory: string;
@@ -95,6 +140,14 @@ interface TaskCategoryGroupInfo {
   tabCount: number;
   totalCount: number;
   allHidden: boolean;
+}
+
+interface CustomCategoryInfo {
+  category: TaskCategory;
+  key: string;
+  tabCount: number;
+  totalCount: number;
+  hidden: boolean;
 }
 
 function isGroupCategoryKey(key: string): boolean {
@@ -150,18 +203,30 @@ function matchesTab(item: UnifiedTask, tab: TaskFilter): boolean {
   return true;
 }
 
+function isTaskHiddenInAll(item: UnifiedTask, hiddenCategories: ReadonlySet<string>): boolean {
+  if (hiddenCategories.has(item.notebookCategoryKey)) return true;
+  for (const catId of item.effectiveCustomCategoryIds) {
+    if (hiddenCategories.has(customCategoryKey(catId))) return true;
+  }
+  return false;
+}
+
 function matchesCategorySelection(
   item: UnifiedTask,
   selectedCategory: string,
   hiddenCategories: ReadonlySet<string>
 ): boolean {
   if (selectedCategory === "all") {
-    return !hiddenCategories.has(item.categoryKey);
+    return !isTaskHiddenInAll(item, hiddenCategories);
+  }
+  if (isCustomCategoryKey(selectedCategory)) {
+    const targetId = customCategoryIdFromKey(selectedCategory);
+    return item.effectiveCustomCategoryIds.includes(targetId);
   }
   if (isGroupCategoryKey(selectedCategory)) {
     return item.topCategory === groupNameFromKey(selectedCategory);
   }
-  return item.categoryKey === selectedCategory;
+  return item.notebookCategoryKey === selectedCategory;
 }
 
 export function TasksPage() {
@@ -179,8 +244,11 @@ export function TasksPage() {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
   const [visibleCount, setVisibleCount] = useState(TASKS_PAGE_SIZE);
   const [groupLimits, setGroupLimits] = useState<Record<string, number>>({});
+  const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
+  const [editingCategory, setEditingCategory] = useState<TaskCategory | null>(null);
+  const [categoryPrefill, setCategoryPrefill] = useState<TaskCategoryPrefill | null>(null);
 
-  const selectedCategory = searchParams.get("category") || "all";
+  const rawSelectedCategory = searchParams.get("category") || "all";
 
   const selectCategory = (next: string) => {
     setSearchParams(
@@ -194,6 +262,45 @@ export function TasksPage() {
     );
   };
 
+  const { readOnly, reason: readOnlyReason } = useWriteState();
+  const { data: notebooks } = useNotebooks();
+  const { data: tags } = useTags();
+  const { data: preferences } = usePreferences();
+  const { data: conflictNotes } = useConflictNotes();
+  const { data: organizeStatus } = useOrganizeStatus();
+  const { data: organizeJobsData } = useOrganizeJobs(Boolean(organizeStatus?.enabled));
+  const tasksQuery = useTasks(true);
+  const updateNote = useUpdateNote();
+  const toggleInline = useToggleInlineTask();
+  const createTaskCategoryMutation = useCreateTaskCategory();
+  const updateTaskCategoryMutation = useUpdateTaskCategory();
+  const deleteTaskCategoryMutation = useDeleteTaskCategory();
+  const setAssignmentMutation = useSetTaskCategoryAssignment();
+
+  const organizeJobs = organizeJobsData?.jobs ?? [];
+  const hasRunningJob = organizeJobs.some((j) => j.status === "running");
+
+  const customCategories = useMemo(
+    () => preferences?.taskCategories ?? [],
+    [preferences?.taskCategories]
+  );
+  const taskCategoryAssignments = useMemo(
+    () => preferences?.taskCategoryAssignments ?? {},
+    [preferences?.taskCategoryAssignments]
+  );
+  const customCategoryById = useMemo(
+    () => new Map(customCategories.map((c) => [c.id, c])),
+    [customCategories]
+  );
+
+  // Fall back to "all" immediately if a selected custom category was deleted (including from another tab)
+  const selectedCategory =
+    preferences !== undefined &&
+    isCustomCategoryKey(rawSelectedCategory) &&
+    !customCategoryById.has(customCategoryIdFromKey(rawSelectedCategory))
+      ? "all"
+      : rawSelectedCategory;
+
   // Reset progressive render slices synchronously when the active view changes
   const sliceResetKey = `${tab}\0${selectedCategory}\0${filterText}`;
   const [prevSliceResetKey, setPrevSliceResetKey] = useState(sliceResetKey);
@@ -203,22 +310,15 @@ export function TasksPage() {
     if (Object.keys(groupLimits).length > 0) setGroupLimits({});
   }
 
-  const { readOnly, reason: readOnlyReason } = useWriteState();
-  const { data: notebooks } = useNotebooks();
-  const { data: conflictNotes } = useConflictNotes();
-  const { data: organizeStatus } = useOrganizeStatus();
-  const { data: organizeJobsData } = useOrganizeJobs(Boolean(organizeStatus?.enabled));
-  const tasksQuery = useTasks(true);
-  const updateNote = useUpdateNote();
-  const toggleInline = useToggleInlineTask();
-
-  const organizeJobs = organizeJobsData?.jobs ?? [];
-  const hasRunningJob = organizeJobs.some((j) => j.status === "running");
-
   const notebookPathById = useMemo(() => buildNotebookPathMap(notebooks), [notebooks]);
+  const notebookLineageById = useMemo(() => buildNotebookLineageMap(notebooks), [notebooks]);
 
   const allTasks = useMemo<UnifiedTask[]>(() => {
-    const resolveCategory = (notebookId: string, notebookPath: string | undefined, notebookTitle: string) => {
+    const resolveNotebookCategory = (
+      notebookId: string,
+      notebookPath: string | undefined,
+      notebookTitle: string
+    ) => {
       const label =
         notebookPath?.trim() ||
         (notebookId ? notebookPathById.get(notebookId) : undefined) ||
@@ -226,22 +326,54 @@ export function TasksPage() {
         "Uncategorized";
       const key = notebookId || `title:${label.toLowerCase()}`;
       const topCategory = label.split(" / ")[0] || label;
-      return { categoryKey: key, categoryLabel: label, topCategory };
+      return { notebookCategoryKey: key, notebookCategoryLabel: label, topCategory };
     };
 
     const todoList: UnifiedTask[] = (tasksQuery.data?.todoNotes ?? []).map((t) => {
       const notebookId = t.parentId || t.notebookId || "";
       const notebookTitle = t.notebookTitle || "Notebook";
-      const cat = resolveCategory(notebookId, t.notebookPath, t.notebookTitle || "");
+      const nbCat = resolveNotebookCategory(notebookId, t.notebookPath, t.notebookTitle || "");
+      const key = `todo-${t.id}`;
+      const title = noteDisplayTitle(t);
+      const sourceUrl = t.sourceUrl ?? "";
+      const tagIds = t.tagIds ?? [];
+      const resolved = resolveTaskCustomCategories(
+        {
+          key,
+          kind: "todo",
+          title,
+          noteTitle: title,
+          notebookId,
+          notebookCategoryLabel: nbCat.notebookCategoryLabel,
+          sourceUrl,
+          tagIds,
+        },
+        customCategories,
+        taskCategoryAssignments,
+        notebookLineageById
+      );
       return {
         kind: "todo",
-        key: `todo-${t.id}`,
+        key,
         noteId: t.id,
-        title: noteDisplayTitle(t),
-        noteTitle: noteDisplayTitle(t),
+        title,
+        noteTitle: title,
         notebookId,
         notebookTitle,
-        ...cat,
+        ...nbCat,
+        sourceUrl,
+        tagIds,
+        manualCategoryId: resolved.manualCategoryId,
+        autoMatchedCategoryIds: resolved.autoMatchedCategoryIds,
+        effectiveCustomCategoryIds: resolved.effectiveCategoryIds,
+        primaryCustomCategory: resolved.primaryCustomCategory,
+        groupKey: resolved.primaryCustomCategory
+          ? customCategoryKey(resolved.primaryCustomCategory.id)
+          : nbCat.notebookCategoryKey,
+        groupLabel: resolved.primaryCustomCategory
+          ? resolved.primaryCustomCategory.name
+          : nbCat.notebookCategoryLabel,
+        groupColor: resolved.primaryCustomCategory?.color,
         completed: Boolean(t.todoCompleted),
         dueMs: t.todoDue ?? 0,
         overdue: isOverdue({ isTodo: true, todoDue: t.todoDue, todoCompleted: t.todoCompleted }, mountTime),
@@ -253,16 +385,48 @@ export function TasksPage() {
     const inlineList: UnifiedTask[] = (tasksQuery.data?.inlineTasks ?? []).map((t) => {
       const notebookId = t.parentId || "";
       const notebookTitle = t.notebookTitle || "Notebook";
-      const cat = resolveCategory(notebookId, t.notebookPath, t.notebookTitle || "");
+      const nbCat = resolveNotebookCategory(notebookId, t.notebookPath, t.notebookTitle || "");
+      const key = `inline-${t.noteId}-${t.line}-${t.column}`;
+      const noteTitle = t.noteTitle || "Untitled Note";
+      const sourceUrl = t.sourceUrl ?? "";
+      const tagIds = t.tagIds ?? [];
+      const resolved = resolveTaskCustomCategories(
+        {
+          key,
+          kind: "inline",
+          title: t.text,
+          noteTitle,
+          notebookId,
+          notebookCategoryLabel: nbCat.notebookCategoryLabel,
+          sourceUrl,
+          tagIds,
+        },
+        customCategories,
+        taskCategoryAssignments,
+        notebookLineageById
+      );
       return {
         kind: "inline",
-        key: `inline-${t.noteId}-${t.line}-${t.column}`,
+        key,
         noteId: t.noteId,
         title: t.text,
-        noteTitle: t.noteTitle || "Untitled Note",
+        noteTitle,
         notebookId,
         notebookTitle,
-        ...cat,
+        ...nbCat,
+        sourceUrl,
+        tagIds,
+        manualCategoryId: resolved.manualCategoryId,
+        autoMatchedCategoryIds: resolved.autoMatchedCategoryIds,
+        effectiveCustomCategoryIds: resolved.effectiveCategoryIds,
+        primaryCustomCategory: resolved.primaryCustomCategory,
+        groupKey: resolved.primaryCustomCategory
+          ? customCategoryKey(resolved.primaryCustomCategory.id)
+          : nbCat.notebookCategoryKey,
+        groupLabel: resolved.primaryCustomCategory
+          ? resolved.primaryCustomCategory.name
+          : nbCat.notebookCategoryLabel,
+        groupColor: resolved.primaryCustomCategory?.color,
         completed: t.checked,
         dueMs: 0,
         overdue: false,
@@ -277,39 +441,76 @@ export function TasksPage() {
       if (a.dueMs && b.dueMs && a.dueMs !== b.dueMs) return a.dueMs - b.dueMs;
       return b.updatedTime - a.updatedTime;
     });
-  }, [tasksQuery.data, mountTime, notebookPathById]);
+  }, [
+    tasksQuery.data,
+    mountTime,
+    notebookPathById,
+    customCategories,
+    taskCategoryAssignments,
+    notebookLineageById,
+  ]);
 
-  const { allCategories, parentGroups, categoryByKey, parentGroupByKey } = useMemo(() => {
-    const map = new Map<string, TaskCategoryInfo>();
+  const {
+    customCategoryInfos,
+    customCategoryInfoByKey,
+    notebookCategories,
+    parentGroups,
+    notebookCategoryByKey,
+    parentGroupByKey,
+  } = useMemo(() => {
+    const customMap = new Map<string, CustomCategoryInfo>();
+    for (const cat of customCategories) {
+      const key = customCategoryKey(cat.id);
+      customMap.set(key, {
+        category: cat,
+        key,
+        tabCount: 0,
+        totalCount: 0,
+        hidden: hiddenCategories.has(key),
+      });
+    }
+
+    const nbMap = new Map<string, NotebookCategoryInfo>();
     for (const item of allTasks) {
-      let info = map.get(item.categoryKey);
-      if (!info) {
-        info = {
-          key: item.categoryKey,
-          label: item.categoryLabel,
+      const inTab = matchesTab(item, tab);
+
+      for (const catId of item.effectiveCustomCategoryIds) {
+        const info = customMap.get(customCategoryKey(catId));
+        if (info) {
+          info.totalCount++;
+          if (inTab) info.tabCount++;
+        }
+      }
+
+      let nbInfo = nbMap.get(item.notebookCategoryKey);
+      if (!nbInfo) {
+        nbInfo = {
+          key: item.notebookCategoryKey,
+          label: item.notebookCategoryLabel,
           topCategory: item.topCategory,
           tabCount: 0,
           totalCount: 0,
-          hidden: hiddenCategories.has(item.categoryKey),
+          hidden: hiddenCategories.has(item.notebookCategoryKey),
         };
-        map.set(item.categoryKey, info);
+        nbMap.set(item.notebookCategoryKey, nbInfo);
       }
-      info.totalCount++;
-      if (matchesTab(item, tab)) info.tabCount++;
+      nbInfo.totalCount++;
+      if (inTab) nbInfo.tabCount++;
     }
 
-    const sortedCategories = [...map.values()].sort(
+    const sortedCustom = [...customMap.values()];
+    const sortedNotebooks = [...nbMap.values()].sort(
       (a, b) => b.tabCount - a.tabCount || b.totalCount - a.totalCount || a.label.localeCompare(b.label)
     );
 
-    const byTop = new Map<string, TaskCategoryInfo[]>();
-    for (const cat of sortedCategories) {
+    const byTop = new Map<string, NotebookCategoryInfo[]>();
+    for (const cat of sortedNotebooks) {
       const list = byTop.get(cat.topCategory) ?? [];
       list.push(cat);
       byTop.set(cat.topCategory, list);
     }
 
-    const groups: TaskCategoryGroupInfo[] = [];
+    const groups: NotebookCategoryGroupInfo[] = [];
     for (const [topCategory, members] of byTop) {
       if (members.length < 2) continue;
       groups.push({
@@ -327,12 +528,14 @@ export function TasksPage() {
     );
 
     return {
-      allCategories: sortedCategories,
+      customCategoryInfos: sortedCustom,
+      customCategoryInfoByKey: customMap,
+      notebookCategories: sortedNotebooks,
       parentGroups: groups,
-      categoryByKey: map,
+      notebookCategoryByKey: nbMap,
       parentGroupByKey: new Map(groups.map((g) => [g.key, g])),
     };
-  }, [allTasks, tab, hiddenCategories]);
+  }, [allTasks, customCategories, tab, hiddenCategories]);
 
   // Tasks within the active category scope (drives status tab counts and task list)
   const categoryScopedTasks = useMemo(
@@ -359,16 +562,20 @@ export function TasksPage() {
   const visibleAllTabCount = useMemo(
     () =>
       allTasks.reduce(
-        (sum, item) => sum + (!hiddenCategories.has(item.categoryKey) && matchesTab(item, tab) ? 1 : 0),
+        (sum, item) => sum + (!isTaskHiddenInAll(item, hiddenCategories) && matchesTab(item, tab) ? 1 : 0),
         0
       ),
     [allTasks, hiddenCategories, tab]
   );
 
   const activeHiddenCategoryCount = useMemo(
-    () => allCategories.reduce((sum, cat) => sum + (cat.hidden ? 1 : 0), 0),
-    [allCategories]
+    () =>
+      customCategoryInfos.reduce((sum, c) => sum + (c.hidden ? 1 : 0), 0) +
+      notebookCategories.reduce((sum, c) => sum + (c.hidden ? 1 : 0), 0),
+    [customCategoryInfos, notebookCategories]
   );
+
+  const totalCategoryCount = customCategoryInfos.length + notebookCategories.length;
 
   const filteredTasks = useMemo(() => {
     const q = filterText.trim().toLowerCase();
@@ -379,7 +586,9 @@ export function TasksPage() {
         item.title.toLowerCase().includes(q) ||
         item.noteTitle.toLowerCase().includes(q) ||
         item.notebookTitle.toLowerCase().includes(q) ||
-        item.categoryLabel.toLowerCase().includes(q)
+        item.notebookCategoryLabel.toLowerCase().includes(q) ||
+        (item.primaryCustomCategory?.name.toLowerCase().includes(q) ?? false) ||
+        item.sourceUrl.toLowerCase().includes(q)
       );
     });
   }, [categoryScopedTasks, tab, filterText]);
@@ -387,13 +596,25 @@ export function TasksPage() {
   const groupedTasks = useMemo(() => {
     const groups = new Map<
       string,
-      { key: string; label: string; tasks: UnifiedTask[]; hasOverdue: boolean }
+      {
+        key: string;
+        label: string;
+        customCategory: TaskCategory | null;
+        tasks: UnifiedTask[];
+        hasOverdue: boolean;
+      }
     >();
     for (const task of filteredTasks) {
-      let group = groups.get(task.categoryKey);
+      let group = groups.get(task.groupKey);
       if (!group) {
-        group = { key: task.categoryKey, label: task.categoryLabel, tasks: [], hasOverdue: false };
-        groups.set(task.categoryKey, group);
+        group = {
+          key: task.groupKey,
+          label: task.groupLabel,
+          customCategory: task.primaryCustomCategory,
+          tasks: [],
+          hasOverdue: false,
+        };
+        groups.set(task.groupKey, group);
       }
       group.tasks.push(task);
       if (task.overdue) group.hasOverdue = true;
@@ -401,40 +622,80 @@ export function TasksPage() {
     return [...groups.values()].sort(
       (a, b) =>
         Number(b.hasOverdue) - Number(a.hasOverdue) ||
+        Number(Boolean(b.customCategory)) - Number(Boolean(a.customCategory)) ||
         b.tasks.length - a.tasks.length ||
         a.label.localeCompare(b.label)
     );
   }, [filteredTasks]);
 
   const quickCategories = useMemo(() => {
-    const visibleTop = allCategories.filter((c) => !c.hidden && c.tabCount > 0).slice(0, QUICK_CATEGORY_LIMIT);
-    const chips: Array<{ key: string; label: string; count: number; isGroup?: boolean }> = visibleTop.map(
-      (c) => ({
-        key: c.key,
-        label: c.label,
-        count: c.tabCount,
-      })
-    );
+    const chips: Array<{
+      key: string;
+      label: string;
+      count: number;
+      color?: TaskCategoryColor;
+    }> = [];
+
+    for (const info of customCategoryInfos) {
+      if (info.hidden) continue;
+      chips.push({
+        key: info.key,
+        label: info.category.name,
+        count: info.tabCount,
+        color: info.category.color,
+      });
+      if (chips.length >= QUICK_CATEGORY_LIMIT) break;
+    }
+
+    if (chips.length < QUICK_CATEGORY_LIMIT) {
+      for (const nb of notebookCategories) {
+        if (nb.hidden || nb.tabCount <= 0) continue;
+        chips.push({
+          key: nb.key,
+          label: nb.label,
+          count: nb.tabCount,
+        });
+        if (chips.length >= QUICK_CATEGORY_LIMIT) break;
+      }
+    }
+
     if (selectedCategory !== "all" && !chips.some((c) => c.key === selectedCategory)) {
-      if (isGroupCategoryKey(selectedCategory)) {
+      if (isCustomCategoryKey(selectedCategory)) {
+        const c = customCategoryInfoByKey.get(selectedCategory);
+        if (c) {
+          chips.push({
+            key: c.key,
+            label: c.category.name,
+            count: c.tabCount,
+            color: c.category.color,
+          });
+        }
+      } else if (isGroupCategoryKey(selectedCategory)) {
         const g = parentGroupByKey.get(selectedCategory);
         chips.push({
           key: selectedCategory,
           label: g?.label ?? `${groupNameFromKey(selectedCategory)} (all)`,
           count: g?.tabCount ?? 0,
-          isGroup: true,
         });
       } else {
-        const c = categoryByKey.get(selectedCategory);
+        const nb = notebookCategoryByKey.get(selectedCategory);
         chips.push({
           key: selectedCategory,
-          label: c?.label ?? notebookPathById.get(selectedCategory) ?? "Selected category",
-          count: c?.tabCount ?? 0,
+          label: nb?.label ?? notebookPathById.get(selectedCategory) ?? "Selected category",
+          count: nb?.tabCount ?? 0,
         });
       }
     }
     return chips;
-  }, [allCategories, selectedCategory, parentGroupByKey, categoryByKey, notebookPathById]);
+  }, [
+    customCategoryInfos,
+    notebookCategories,
+    selectedCategory,
+    customCategoryInfoByKey,
+    parentGroupByKey,
+    notebookCategoryByKey,
+    notebookPathById,
+  ]);
 
   const selectedCategoryHiddenKeys = useMemo(() => {
     if (selectedCategory === "all") return [];
@@ -445,17 +706,23 @@ export function TasksPage() {
     return hiddenCategories.has(selectedCategory) ? [selectedCategory] : [];
   }, [selectedCategory, parentGroupByKey, hiddenCategories]);
 
+  const filteredPopoverCustom = useMemo(() => {
+    const q = categorySearch.trim().toLowerCase();
+    if (!q) return customCategoryInfos;
+    return customCategoryInfos.filter((c) => c.category.name.toLowerCase().includes(q));
+  }, [customCategoryInfos, categorySearch]);
+
   const filteredPopoverGroups = useMemo(() => {
     const q = categorySearch.trim().toLowerCase();
     if (!q) return parentGroups;
     return parentGroups.filter((g) => g.label.toLowerCase().includes(q));
   }, [parentGroups, categorySearch]);
 
-  const filteredPopoverCategories = useMemo(() => {
+  const filteredPopoverNotebooks = useMemo(() => {
     const q = categorySearch.trim().toLowerCase();
-    if (!q) return allCategories;
-    return allCategories.filter((c) => c.label.toLowerCase().includes(q));
-  }, [allCategories, categorySearch]);
+    if (!q) return notebookCategories;
+    return notebookCategories.filter((c) => c.label.toLowerCase().includes(q));
+  }, [notebookCategories, categorySearch]);
 
   const updateHiddenCategories = (updater: (prev: Set<string>) => Set<string>) => {
     setHiddenCategories((prev) => {
@@ -487,7 +754,7 @@ export function TasksPage() {
     }
   };
 
-  const toggleHideGroup = (group: TaskCategoryGroupInfo) => {
+  const toggleHideGroup = (group: NotebookCategoryGroupInfo) => {
     updateHiddenCategories((next) => {
       if (group.allHidden) {
         for (const k of group.memberKeys) next.delete(k);
@@ -537,6 +804,73 @@ export function TasksPage() {
     }
   };
 
+  const openCreateCategory = (prefill: TaskCategoryPrefill | null = null) => {
+    setEditingCategory(null);
+    setCategoryPrefill(prefill);
+    setCategoryMenuOpen(false);
+    setCategoryDialogOpen(true);
+  };
+
+  const openEditCategory = (cat: TaskCategory) => {
+    setEditingCategory(cat);
+    setCategoryPrefill(null);
+    setCategoryMenuOpen(false);
+    setCategoryDialogOpen(true);
+  };
+
+  const handleSaveCategory = async (input: TaskCategoryInput, existingId: string | null) => {
+    try {
+      if (existingId) {
+        const updated = await updateTaskCategoryMutation.mutateAsync({ id: existingId, patch: input });
+        toast.success(`Updated category "${updated.name}"`);
+      } else {
+        const created = await createTaskCategoryMutation.mutateAsync(input);
+        toast.success(`Created category "${created.name}"`);
+      }
+      setCategoryDialogOpen(false);
+      setEditingCategory(null);
+      setCategoryPrefill(null);
+    } catch (err) {
+      toast.error(existingId ? "Could not update category" : "Could not create category", {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
+  };
+
+  const handleDeleteCategory = async (id: string) => {
+    const existing = customCategoryById.get(id);
+    try {
+      await deleteTaskCategoryMutation.mutateAsync(id);
+      const key = customCategoryKey(id);
+      if (rawSelectedCategory === key) {
+        selectCategory("all");
+      }
+      if (hiddenCategories.has(key)) {
+        updateHiddenCategories((next) => {
+          next.delete(key);
+          return next;
+        });
+      }
+      setCategoryDialogOpen(false);
+      setEditingCategory(null);
+      toast.success(existing ? `Deleted category "${existing.name}"` : "Deleted category");
+    } catch (err) {
+      toast.error("Could not delete category", {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
+  };
+
+  const handleAssignCategory = async (task: UnifiedTask, categoryId: string | null) => {
+    try {
+      await setAssignmentMutation.mutateAsync({ taskKey: task.key, categoryId });
+    } catch (err) {
+      toast.error("Could not assign category", {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
+  };
+
   const handleToggle = async (task: UnifiedTask) => {
     if (readOnly) return;
     if (task.kind === "todo") {
@@ -573,8 +907,17 @@ export function TasksPage() {
     }
   };
 
-  const renderTaskCard = (task: UnifiedTask, showCategoryBadge: boolean) => {
+  const renderTaskCard = (task: UnifiedTask, showPrimaryCategoryBadge: boolean) => {
     const busy = updateNote.isPending || toggleInline.isPending;
+    const customCat = task.primaryCustomCategory;
+    const customColor = customCat ? getTaskCategoryColorStyle(customCat.color) : null;
+    const autoCategoryName =
+      task.autoMatchedCategoryIds.length > 0
+        ? customCategoryById.get(task.autoMatchedCategoryIds[0])?.name ?? task.notebookCategoryLabel
+        : task.notebookCategoryLabel;
+    const host = extractSourceHost(task.sourceUrl);
+    const showNotebookChip = showPrimaryCategoryBadge || Boolean(customCat);
+
     return (
       <div
         key={task.key}
@@ -638,30 +981,119 @@ export function TasksPage() {
             )}
           </div>
 
-          {(task.kind === "inline" || showCategoryBadge) && (
-            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-              {task.kind === "inline" && (
-                <Link
-                  to={`/notes/${task.noteId}`}
-                  className="inline-flex min-w-0 max-w-full items-center gap-1 hover:text-primary hover:underline"
-                >
-                  <span className="truncate">{task.noteTitle}</span>
-                  <ExternalLink className="h-3 w-3 shrink-0" />
-                </Link>
-              )}
-              {showCategoryBadge && (
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+            {task.kind === "inline" && (
+              <Link
+                to={`/notes/${task.noteId}`}
+                className="inline-flex min-w-0 max-w-full items-center gap-1 hover:text-primary hover:underline"
+              >
+                <span className="truncate">{task.noteTitle}</span>
+                <ExternalLink className="h-3 w-3 shrink-0" />
+              </Link>
+            )}
+
+            {showPrimaryCategoryBadge && customCat && customColor && (
+              <button
+                type="button"
+                onClick={() => selectCategory(customCategoryKey(customCat.id))}
+                title={`Filter by ${customCat.name}`}
+                className={cn(
+                  "inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-[11px] font-medium transition-opacity hover:opacity-85",
+                  customColor.badgeClass
+                )}
+              >
+                <span
+                  className={cn("h-1.5 w-1.5 shrink-0 rounded-full", customColor.dotClass)}
+                  aria-hidden="true"
+                />
+                <span className="truncate">{customCat.name}</span>
+              </button>
+            )}
+
+            {showNotebookChip && (
+              <button
+                type="button"
+                onClick={() => selectCategory(task.notebookCategoryKey)}
+                title={`Filter by ${task.notebookCategoryLabel}`}
+                className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-md bg-muted/60 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <Folder className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
+                <span className="truncate">{task.notebookCategoryLabel}</span>
+              </button>
+            )}
+
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
                 <button
                   type="button"
-                  onClick={() => selectCategory(task.categoryKey)}
-                  title={`Filter by ${task.categoryLabel}`}
-                  className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-md bg-muted/60 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  aria-label={`Assign category for "${task.title}"`}
+                  title="Assign category"
+                  className="inline-flex h-5 items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground/80 transition-colors hover:bg-accent hover:text-foreground"
                 >
-                  <Folder className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
-                  <span className="truncate">{task.categoryLabel}</span>
+                  <TagIcon className="h-3 w-3 shrink-0" aria-hidden="true" />
                 </button>
-              )}
-            </div>
-          )}
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-60 max-w-[calc(100vw-2rem)] text-xs">
+                <DropdownMenuLabel className="text-[11px] font-normal text-muted-foreground">
+                  Assign task category
+                </DropdownMenuLabel>
+                <DropdownMenuItem
+                  onClick={() => void handleAssignCategory(task, null)}
+                  className="cursor-pointer flex items-center justify-between gap-2"
+                >
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <Sparkles className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
+                    <span className="truncate">Auto ({autoCategoryName})</span>
+                  </span>
+                  {task.manualCategoryId === null && (
+                    <Check className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
+                  )}
+                </DropdownMenuItem>
+
+                {customCategories.length > 0 && <DropdownMenuSeparator />}
+                {customCategories.map((cat) => {
+                  const style = getTaskCategoryColorStyle(cat.color);
+                  const assigned = task.manualCategoryId === cat.id;
+                  return (
+                    <DropdownMenuItem
+                      key={cat.id}
+                      onClick={() => void handleAssignCategory(task, cat.id)}
+                      className="cursor-pointer flex items-center justify-between gap-2"
+                    >
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span
+                          className={cn("h-2 w-2 shrink-0 rounded-full", style.dotClass)}
+                          aria-hidden="true"
+                        />
+                        <span className="truncate">{cat.name}</span>
+                      </span>
+                      {assigned && <Check className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />}
+                    </DropdownMenuItem>
+                  );
+                })}
+
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={() =>
+                    openCreateCategory({
+                      name: task.notebookTitle !== "Notebook" ? task.notebookTitle : "",
+                      rules: {
+                        ...(task.notebookId ? { notebookIds: [task.notebookId] } : {}),
+                        ...(task.notebookCategoryLabel !== "Uncategorized"
+                          ? { notebookPathPrefixes: [task.notebookCategoryLabel] }
+                          : {}),
+                        ...(host ? { sourceUrlPatterns: [host] } : {}),
+                      },
+                    })
+                  }
+                  className="cursor-pointer flex items-center gap-1.5 text-primary focus:text-primary"
+                >
+                  <Plus className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  <span className="truncate">New category from "{task.notebookCategoryLabel}"…</span>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </div>
       </div>
     );
@@ -776,7 +1208,7 @@ export function TasksPage() {
             ))}
           </div>
 
-          {allCategories.length > 0 && (
+          {(totalCategoryCount > 0 || !tasksQuery.isLoading) && (
             <div
               className="flex min-w-0 flex-wrap items-center gap-1.5 pt-0.5"
               role="group"
@@ -799,6 +1231,7 @@ export function TasksPage() {
 
               {quickCategories.map((chip) => {
                 const active = selectedCategory === chip.key;
+                const colorStyle = chip.color ? getTaskCategoryColorStyle(chip.color) : null;
                 return (
                   <Button
                     key={chip.key}
@@ -810,216 +1243,326 @@ export function TasksPage() {
                     className={cn(
                       "h-7 max-w-full min-w-0 gap-1.5 px-2.5 text-xs border",
                       active
-                        ? "border-primary/40 bg-primary/10 text-foreground"
+                        ? colorStyle?.activeChipClass ?? "border-primary/40 bg-primary/10 text-foreground"
                         : "border-border/60 text-muted-foreground"
                     )}
                   >
-                    <Folder className="size-3! shrink-0 opacity-75" aria-hidden="true" />
+                    {colorStyle ? (
+                      <span
+                        className={cn("h-2 w-2 shrink-0 rounded-full", colorStyle.dotClass)}
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <Folder className="size-3! shrink-0 opacity-75" aria-hidden="true" />
+                    )}
                     <span className="truncate">{chip.label}</span>{" "}
                     <span className="shrink-0 opacity-75">({chip.count})</span>
                   </Button>
                 );
               })}
 
-              <Popover
-                open={categoryMenuOpen}
-                onOpenChange={(open) => {
-                  setCategoryMenuOpen(open);
-                  if (!open) setCategorySearch("");
-                }}
-              >
-                <PopoverTrigger asChild>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    aria-label="Choose task category"
-                    className="h-7 gap-1 px-2.5 text-xs"
-                  >
-                    <span>Categories ({allCategories.length})</span>
-                    <ChevronDown className="size-3! opacity-70" aria-hidden="true" />
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent
-                  align="start"
-                  className="w-80 max-w-[calc(100vw-2rem)] p-2 space-y-2"
+              {totalCategoryCount > 0 && (
+                <Popover
+                  open={categoryMenuOpen}
+                  onOpenChange={(open) => {
+                    setCategoryMenuOpen(open);
+                    if (!open) setCategorySearch("");
+                  }}
                 >
-                  {allCategories.length > 6 && (
-                    <div className="relative">
-                      <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-                      <Input
-                        value={categorySearch}
-                        onChange={(e) => setCategorySearch(e.target.value)}
-                        placeholder="Filter categories…"
-                        aria-label="Filter categories"
-                        className="h-7 pl-8 text-xs"
-                      />
-                    </div>
-                  )}
-
-                  <div className="max-h-72 overflow-y-auto overflow-x-hidden space-y-1">
-                    <div className="flex items-center justify-between gap-1">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          selectCategory("all");
-                          setCategoryMenuOpen(false);
-                        }}
-                        className={cn(
-                          "flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent",
-                          selectedCategory === "all" && "bg-accent font-medium text-foreground"
-                        )}
-                      >
-                        <span className="flex min-w-0 items-center gap-1.5">
-                          <Check
-                            className={cn(
-                              "h-3.5 w-3.5 shrink-0",
-                              selectedCategory === "all" ? "opacity-100 text-primary" : "opacity-0"
-                            )}
-                            aria-hidden="true"
-                          />
-                          <span className="truncate">All categories</span>
-                        </span>
-                        <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
-                          {visibleAllTabCount}
-                        </span>
-                      </button>
-                      {activeHiddenCategoryCount > 0 && (
-                        <button
-                          type="button"
-                          onClick={clearAllHiddenCategories}
-                          className="shrink-0 rounded-md px-2 py-1 text-[11px] text-primary hover:bg-accent"
-                        >
-                          Show all
-                        </button>
-                      )}
-                    </div>
-
-                    {filteredPopoverGroups.length > 0 && (
-                      <div className="pt-1 space-y-0.5">
-                        <p className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                          Groups
-                        </p>
-                        {filteredPopoverGroups.map((group) => {
-                          const active = selectedCategory === group.key;
-                          return (
-                            <div key={group.key} className="flex min-w-0 items-center gap-1">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  selectCategory(group.key);
-                                  setCategoryMenuOpen(false);
-                                }}
-                                className={cn(
-                                  "flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent",
-                                  active && "bg-accent font-medium text-foreground",
-                                  group.allHidden && "text-muted-foreground"
-                                )}
-                              >
-                                <span className="flex min-w-0 items-center gap-1.5">
-                                  <Check
-                                    className={cn(
-                                      "h-3.5 w-3.5 shrink-0",
-                                      active ? "opacity-100 text-primary" : "opacity-0"
-                                    )}
-                                    aria-hidden="true"
-                                  />
-                                  <Folder className="h-3.5 w-3.5 shrink-0 opacity-70" aria-hidden="true" />
-                                  <span className="truncate">{group.label}</span>
-                                </span>{" "}
-                                <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
-                                  {group.tabCount}
-                                </span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => toggleHideGroup(group)}
-                                aria-label={
-                                  group.allHidden
-                                    ? `Show ${group.label} in All`
-                                    : `Hide ${group.label} from All`
-                                }
-                                title={
-                                  group.allHidden
-                                    ? `Show ${group.label} in All`
-                                    : `Hide ${group.label} from All`
-                                }
-                                className="shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                              >
-                                {group.allHidden ? (
-                                  <Eye className="h-3.5 w-3.5 text-primary" />
-                                ) : (
-                                  <EyeOff className="h-3.5 w-3.5" />
-                                )}
-                              </button>
-                            </div>
-                          );
-                        })}
+                  <PopoverTrigger asChild>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      aria-label="Choose task category"
+                      className="h-7 gap-1 px-2.5 text-xs"
+                    >
+                      <span>Categories ({totalCategoryCount})</span>
+                      <ChevronDown className="size-3! opacity-70" aria-hidden="true" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent
+                    align="start"
+                    className="w-80 max-w-[calc(100vw-2rem)] p-2 space-y-2"
+                  >
+                    {totalCategoryCount > 6 && (
+                      <div className="relative">
+                        <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                        <Input
+                          value={categorySearch}
+                          onChange={(e) => setCategorySearch(e.target.value)}
+                          placeholder="Filter categories…"
+                          aria-label="Filter categories"
+                          className="h-7 pl-8 text-xs"
+                        />
                       </div>
                     )}
 
-                    <div className="pt-1 space-y-0.5">
-                      <p className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                        Notebooks
-                      </p>
-                      {filteredPopoverCategories.length === 0 ? (
-                        <p className="px-2 py-2 text-xs text-muted-foreground">No matching categories</p>
-                      ) : (
-                        filteredPopoverCategories.map((cat) => {
-                          const active = selectedCategory === cat.key;
-                          return (
-                            <div key={cat.key} className="flex min-w-0 items-center gap-1">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  selectCategory(cat.key);
-                                  setCategoryMenuOpen(false);
-                                }}
-                                className={cn(
-                                  "flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent",
-                                  active && "bg-accent font-medium text-foreground",
-                                  cat.hidden && "text-muted-foreground"
-                                )}
-                              >
-                                <span className="flex min-w-0 items-center gap-1.5">
-                                  <Check
-                                    className={cn(
-                                      "h-3.5 w-3.5 shrink-0",
-                                      active ? "opacity-100 text-primary" : "opacity-0"
-                                    )}
-                                    aria-hidden="true"
-                                  />
-                                  <span className="truncate">{cat.label}</span>
-                                </span>{" "}
-                                <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
-                                  {cat.tabCount}
-                                </span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => toggleHideCategory(cat.key, cat.label)}
-                                aria-label={
-                                  cat.hidden ? `Show ${cat.label} in All` : `Hide ${cat.label} from All`
-                                }
-                                title={
-                                  cat.hidden ? `Show ${cat.label} in All` : `Hide ${cat.label} from All`
-                                }
-                                className="shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                              >
-                                {cat.hidden ? (
-                                  <Eye className="h-3.5 w-3.5 text-primary" />
-                                ) : (
-                                  <EyeOff className="h-3.5 w-3.5" />
-                                )}
-                              </button>
-                            </div>
-                          );
-                        })
+                    <div className="max-h-72 overflow-y-auto overflow-x-hidden space-y-1">
+                      <div className="flex items-center justify-between gap-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            selectCategory("all");
+                            setCategoryMenuOpen(false);
+                          }}
+                          className={cn(
+                            "flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent",
+                            selectedCategory === "all" && "bg-accent font-medium text-foreground"
+                          )}
+                        >
+                          <span className="flex min-w-0 items-center gap-1.5">
+                            <Check
+                              className={cn(
+                                "h-3.5 w-3.5 shrink-0",
+                                selectedCategory === "all" ? "opacity-100 text-primary" : "opacity-0"
+                              )}
+                              aria-hidden="true"
+                            />
+                            <span className="truncate">All categories</span>
+                          </span>{" "}
+                          <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+                            {visibleAllTabCount}
+                          </span>
+                        </button>
+                        {activeHiddenCategoryCount > 0 && (
+                          <button
+                            type="button"
+                            onClick={clearAllHiddenCategories}
+                            className="shrink-0 rounded-md px-2 py-1 text-[11px] text-primary hover:bg-accent"
+                          >
+                            Show all
+                          </button>
+                        )}
+                      </div>
+
+                      {filteredPopoverCustom.length > 0 && (
+                        <div className="pt-1 space-y-0.5">
+                          <p className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                            Custom Categories
+                          </p>
+                          {filteredPopoverCustom.map((info) => {
+                            const active = selectedCategory === info.key;
+                            const style = getTaskCategoryColorStyle(info.category.color);
+                            return (
+                              <div key={info.key} className="flex min-w-0 items-center gap-0.5">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    selectCategory(info.key);
+                                    setCategoryMenuOpen(false);
+                                  }}
+                                  className={cn(
+                                    "flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent",
+                                    active && "bg-accent font-medium text-foreground",
+                                    info.hidden && "text-muted-foreground"
+                                  )}
+                                >
+                                  <span className="flex min-w-0 items-center gap-1.5">
+                                    <Check
+                                      className={cn(
+                                        "h-3.5 w-3.5 shrink-0",
+                                        active ? "opacity-100 text-primary" : "opacity-0"
+                                      )}
+                                      aria-hidden="true"
+                                    />
+                                    <span
+                                      className={cn("h-2 w-2 shrink-0 rounded-full", style.dotClass)}
+                                      aria-hidden="true"
+                                    />
+                                    <span className="truncate">{info.category.name}</span>
+                                  </span>{" "}
+                                  <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+                                    {info.tabCount}
+                                  </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => openEditCategory(info.category)}
+                                  aria-label={`Edit ${info.category.name}`}
+                                  title={`Edit ${info.category.name}`}
+                                  className="shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                                >
+                                  <Pencil className="h-3.5 w-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => toggleHideCategory(info.key, info.category.name)}
+                                  aria-label={
+                                    info.hidden
+                                      ? `Show ${info.category.name} in All`
+                                      : `Hide ${info.category.name} from All`
+                                  }
+                                  title={
+                                    info.hidden
+                                      ? `Show ${info.category.name} in All`
+                                      : `Hide ${info.category.name} from All`
+                                  }
+                                  className="shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                                >
+                                  {info.hidden ? (
+                                    <Eye className="h-3.5 w-3.5 text-primary" />
+                                  ) : (
+                                    <EyeOff className="h-3.5 w-3.5" />
+                                  )}
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
                       )}
+
+                      {filteredPopoverGroups.length > 0 && (
+                        <div className="pt-1 space-y-0.5">
+                          <p className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                            Groups
+                          </p>
+                          {filteredPopoverGroups.map((group) => {
+                            const active = selectedCategory === group.key;
+                            return (
+                              <div key={group.key} className="flex min-w-0 items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    selectCategory(group.key);
+                                    setCategoryMenuOpen(false);
+                                  }}
+                                  className={cn(
+                                    "flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent",
+                                    active && "bg-accent font-medium text-foreground",
+                                    group.allHidden && "text-muted-foreground"
+                                  )}
+                                >
+                                  <span className="flex min-w-0 items-center gap-1.5">
+                                    <Check
+                                      className={cn(
+                                        "h-3.5 w-3.5 shrink-0",
+                                        active ? "opacity-100 text-primary" : "opacity-0"
+                                      )}
+                                      aria-hidden="true"
+                                    />
+                                    <Folder className="h-3.5 w-3.5 shrink-0 opacity-70" aria-hidden="true" />
+                                    <span className="truncate">{group.label}</span>
+                                  </span>{" "}
+                                  <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+                                    {group.tabCount}
+                                  </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => toggleHideGroup(group)}
+                                  aria-label={
+                                    group.allHidden
+                                      ? `Show ${group.label} in All`
+                                      : `Hide ${group.label} from All`
+                                  }
+                                  title={
+                                    group.allHidden
+                                      ? `Show ${group.label} in All`
+                                      : `Hide ${group.label} from All`
+                                  }
+                                  className="shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                                >
+                                  {group.allHidden ? (
+                                    <Eye className="h-3.5 w-3.5 text-primary" />
+                                  ) : (
+                                    <EyeOff className="h-3.5 w-3.5" />
+                                  )}
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      <div className="pt-1 space-y-0.5">
+                        <p className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                          Notebooks
+                        </p>
+                        {filteredPopoverNotebooks.length === 0 ? (
+                          <p className="px-2 py-2 text-xs text-muted-foreground">No matching categories</p>
+                        ) : (
+                          filteredPopoverNotebooks.map((cat) => {
+                            const active = selectedCategory === cat.key;
+                            return (
+                              <div key={cat.key} className="flex min-w-0 items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    selectCategory(cat.key);
+                                    setCategoryMenuOpen(false);
+                                  }}
+                                  className={cn(
+                                    "flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent",
+                                    active && "bg-accent font-medium text-foreground",
+                                    cat.hidden && "text-muted-foreground"
+                                  )}
+                                >
+                                  <span className="flex min-w-0 items-center gap-1.5">
+                                    <Check
+                                      className={cn(
+                                        "h-3.5 w-3.5 shrink-0",
+                                        active ? "opacity-100 text-primary" : "opacity-0"
+                                      )}
+                                      aria-hidden="true"
+                                    />
+                                    <span className="truncate">{cat.label}</span>
+                                  </span>{" "}
+                                  <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+                                    {cat.tabCount}
+                                  </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => toggleHideCategory(cat.key, cat.label)}
+                                  aria-label={
+                                    cat.hidden ? `Show ${cat.label} in All` : `Hide ${cat.label} from All`
+                                  }
+                                  title={
+                                    cat.hidden ? `Show ${cat.label} in All` : `Hide ${cat.label} from All`
+                                  }
+                                  className="shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                                >
+                                  {cat.hidden ? (
+                                    <Eye className="h-3.5 w-3.5 text-primary" />
+                                  ) : (
+                                    <EyeOff className="h-3.5 w-3.5" />
+                                  )}
+                                </button>
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
                     </div>
-                  </div>
-                </PopoverContent>
-              </Popover>
+
+                    <div className="border-t border-border pt-1.5">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => openCreateCategory(null)}
+                        className="w-full h-7 justify-start gap-1.5 px-2 text-xs text-primary hover:text-primary"
+                      >
+                        <Plus className="size-3.5!" aria-hidden="true" />
+                        <span>New category…</span>
+                      </Button>
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              )}
+
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                aria-label="New task category"
+                onClick={() => openCreateCategory(null)}
+                className="h-7 gap-1 px-2 text-xs"
+              >
+                <Plus className="size-3!" aria-hidden="true" />
+                <span>New</span>
+              </Button>
 
               {selectedCategory !== "all" && (
                 <Button
@@ -1172,6 +1715,9 @@ export function TasksPage() {
                   const limit = groupLimits[group.key] ?? TASKS_GROUP_PAGE_SIZE;
                   const visibleGroupTasks = group.tasks.slice(0, limit);
                   const remainingInGroup = Math.max(0, group.tasks.length - visibleGroupTasks.length);
+                  const customColor = group.customCategory
+                    ? getTaskCategoryColorStyle(group.customCategory.color)
+                    : null;
 
                   return (
                     <section key={group.key} className="min-w-0 space-y-2">
@@ -1187,37 +1733,59 @@ export function TasksPage() {
                           ) : (
                             <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                           )}
-                          <Folder className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
-                          <span className="truncate">{group.label}</span>
+                          {customColor ? (
+                            <span
+                              className={cn("h-2.5 w-2.5 shrink-0 rounded-full", customColor.dotClass)}
+                              aria-hidden="true"
+                            />
+                          ) : (
+                            <Folder className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
+                          )}
+                          <span className="truncate">{group.label}</span>{" "}
                           <Badge variant="secondary" className="shrink-0 font-mono text-[10px]">
                             {group.tasks.length}
                           </Badge>
                         </button>
 
-                        {selectedCategory === "all" && (
-                          <div className="flex shrink-0 items-center gap-1">
+                        <div className="flex shrink-0 items-center gap-1">
+                          {group.customCategory && (
                             <Button
                               type="button"
                               size="sm"
                               variant="ghost"
-                              onClick={() => selectCategory(group.key)}
-                              className="h-6 px-2 text-[11px] text-muted-foreground hover:text-foreground"
-                            >
-                              Only
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="ghost"
-                              aria-label={`Hide ${group.label} from All`}
-                              title={`Hide ${group.label} from All`}
-                              onClick={() => toggleHideCategory(group.key, group.label, true)}
+                              aria-label={`Edit ${group.label}`}
+                              title={`Edit ${group.label}`}
+                              onClick={() => openEditCategory(group.customCategory!)}
                               className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
                             >
-                              <EyeOff className="h-3.5 w-3.5" />
+                              <Pencil className="size-3.5!" />
                             </Button>
-                          </div>
-                        )}
+                          )}
+                          {selectedCategory === "all" && (
+                            <>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => selectCategory(group.key)}
+                                className="h-6 px-2 text-[11px] text-muted-foreground hover:text-foreground"
+                              >
+                                Only
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                aria-label={`Hide ${group.label} from All`}
+                                title={`Hide ${group.label} from All`}
+                                onClick={() => toggleHideCategory(group.key, group.label, true)}
+                                className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
+                              >
+                                <EyeOff className="size-3.5!" />
+                              </Button>
+                            </>
+                          )}
+                        </div>
                       </div>
 
                       {!collapsed && (
@@ -1264,6 +1832,26 @@ export function TasksPage() {
           </div>
         </div>
       </div>
+
+      <TaskCategoryDialog
+        open={categoryDialogOpen}
+        onOpenChange={(open) => {
+          setCategoryDialogOpen(open);
+          if (!open) {
+            setEditingCategory(null);
+            setCategoryPrefill(null);
+          }
+        }}
+        category={editingCategory}
+        prefill={categoryPrefill}
+        notebooks={notebooks ?? []}
+        tags={tags ?? []}
+        allTasks={allTasks}
+        isSaving={createTaskCategoryMutation.isPending || updateTaskCategoryMutation.isPending}
+        isDeleting={deleteTaskCategoryMutation.isPending}
+        onSave={handleSaveCategory}
+        onDelete={handleDeleteCategory}
+      />
     </AppLayout>
   );
 }

@@ -1642,6 +1642,8 @@ export class NoteCacheService {
       savedSearches: prefs.savedSearches,
       recentReads: prefs.recentReads,
       scratchpad: prefs.scratchpad,
+      taskCategories: prefs.taskCategories,
+      taskCategoryAssignments: prefs.taskCategoryAssignments,
       favoriteNotes,
       favoriteNotebooks,
     };
@@ -1867,12 +1869,14 @@ export class NoteCacheService {
       const nbTitle = nb ? notebookTitle(nb) : '';
       const nbPath = pathForNotebook(note.parentId || '');
       const noteTagIds = tagIdsByNote.get(note.id);
+      const sourceUrl = note.properties.source_url?.trim() || '';
 
       if (note.isTodo) {
         todoNotes.push({
           ...this.toNoteListItem(entry, note, tagIdsByNote),
           notebookTitle: nbTitle,
           ...(nbPath ? { notebookPath: nbPath } : {}),
+          ...(sourceUrl ? { sourceUrl } : {}),
         });
       }
 
@@ -1884,6 +1888,7 @@ export class NoteCacheService {
             parentId: note.parentId || '',
             notebookTitle: nbTitle,
             ...(nbPath ? { notebookPath: nbPath } : {}),
+            ...(sourceUrl ? { sourceUrl } : {}),
             line: t.line,
             column: t.column,
             text: t.text,

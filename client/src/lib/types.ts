@@ -398,12 +398,47 @@ export interface FavoriteNotebookSummary {
   encrypted: boolean;
 }
 
+export type TaskCategoryColor =
+  | "slate"
+  | "terracotta"
+  | "amber"
+  | "emerald"
+  | "sky"
+  | "violet"
+  | "rose";
+
+export interface TaskCategoryRules {
+  notebookIds?: string[];
+  notebookPathPrefixes?: string[];
+  sourceUrlPatterns?: string[];
+  tagIds?: string[];
+  keywords?: string[];
+  taskKind?: "todo" | "inline";
+}
+
+export interface TaskCategory {
+  id: string;
+  name: string;
+  color: TaskCategoryColor;
+  rules: TaskCategoryRules;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface TaskCategoryInput {
+  name: string;
+  color?: TaskCategoryColor;
+  rules?: TaskCategoryRules;
+}
+
 export interface UserPreferences {
   favoriteNoteIds: string[];
   favoriteNotebookIds: string[];
   savedSearches: SavedSearch[];
   recentReads: RecentReadEntry[];
   scratchpad: string;
+  taskCategories: TaskCategory[];
+  taskCategoryAssignments: Record<string, string>;
   favoriteNotes: NoteListItem[];
   favoriteNotebooks: FavoriteNotebookSummary[];
 }
@@ -454,6 +489,8 @@ export interface TodoTaskItem extends NoteListItem {
   notebookTitle: string;
   /** Full notebook hierarchy path (e.g. "Saved items / Facebook") */
   notebookPath?: string;
+  /** Note source_url property, when present */
+  sourceUrl?: string;
 }
 
 export interface InlineTaskItem {
@@ -463,6 +500,8 @@ export interface InlineTaskItem {
   notebookTitle: string;
   /** Full notebook hierarchy path (e.g. "Saved items / Facebook") */
   notebookPath?: string;
+  /** Note source_url property, when present */
+  sourceUrl?: string;
   line: number;
   column: number;
   text: string;

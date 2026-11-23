@@ -30,6 +30,8 @@ import {
   RecentNotesResponse,
   SavedSearch,
   Tag,
+  TaskCategory,
+  TaskCategoryInput,
   TasksResponse,
   SearchResult,
   LoginResponse,
@@ -1010,6 +1012,8 @@ export const EMPTY_USER_PREFERENCES: UserPreferences = {
   savedSearches: [],
   recentReads: [],
   scratchpad: "",
+  taskCategories: [],
+  taskCategoryAssignments: {},
   favoriteNotes: [],
   favoriteNotebooks: [],
 };
@@ -1019,12 +1023,21 @@ function normalizePreferences(data: unknown): UserPreferences {
     return EMPTY_USER_PREFERENCES;
   }
   const obj = data as Partial<UserPreferences>;
+  const rawAssignments = obj.taskCategoryAssignments;
+  const taskCategoryAssignments: Record<string, string> = {};
+  if (rawAssignments && typeof rawAssignments === "object" && !Array.isArray(rawAssignments)) {
+    for (const [k, v] of Object.entries(rawAssignments)) {
+      if (typeof v === "string" && v) taskCategoryAssignments[k] = v;
+    }
+  }
   return {
     favoriteNoteIds: Array.isArray(obj.favoriteNoteIds) ? obj.favoriteNoteIds : [],
     favoriteNotebookIds: Array.isArray(obj.favoriteNotebookIds) ? obj.favoriteNotebookIds : [],
     savedSearches: Array.isArray(obj.savedSearches) ? obj.savedSearches : [],
     recentReads: Array.isArray(obj.recentReads) ? obj.recentReads : [],
     scratchpad: typeof obj.scratchpad === "string" ? obj.scratchpad : "",
+    taskCategories: Array.isArray(obj.taskCategories) ? obj.taskCategories : [],
+    taskCategoryAssignments,
     favoriteNotes: Array.isArray(obj.favoriteNotes) ? obj.favoriteNotes : [],
     favoriteNotebooks: Array.isArray(obj.favoriteNotebooks) ? obj.favoriteNotebooks : [],
   };
@@ -1091,6 +1104,43 @@ export async function saveScratchpad(scratchpad: string): Promise<{ scratchpad: 
     body: JSON.stringify({ scratchpad }),
   });
   return { scratchpad: typeof data?.scratchpad === "string" ? data.scratchpad : scratchpad };
+}
+
+export async function createTaskCategory(input: TaskCategoryInput): Promise<TaskCategory> {
+  return request<TaskCategory>("/api/preferences/task-categories", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function updateTaskCategory(
+  id: string,
+  patch: Partial<TaskCategoryInput>
+): Promise<TaskCategory> {
+  return request<TaskCategory>(`/api/preferences/task-categories/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteTaskCategory(id: string): Promise<void> {
+  await request(`/api/preferences/task-categories/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function setTaskCategoryAssignment(
+  taskKey: string,
+  categoryId: string | null
+): Promise<{ taskCategoryAssignments: Record<string, string> }> {
+  const data = await request<{ taskCategoryAssignments?: Record<string, string> } | null>(
+    "/api/preferences/task-categories/assignments",
+    {
+      method: "PUT",
+      body: JSON.stringify({ taskKey, categoryId }),
+    }
+  );
+  return { taskCategoryAssignments: data?.taskCategoryAssignments ?? {} };
 }
 
 // ---------------------------------------------------------------------------

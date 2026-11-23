@@ -224,6 +224,80 @@ describe('extended workspace API integration', () => {
     assert.ok(Array.isArray(recent.data.recentCreated) && recent.data.recentCreated.length > 0);
   });
 
+  test('preferences custom task categories support create, edit, delete, and manual assignments', async () => {
+    const created = await app.api('/api/preferences/task-categories', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'Facebook Bookmarked',
+        color: 'sky',
+        rules: {
+          notebookIds: [demoId('nb-travel')],
+          notebookPathPrefixes: ['Saved items / Facebook'],
+          sourceUrlPatterns: ['facebook.com'],
+          keywords: ['reel'],
+          taskKind: 'todo',
+        },
+      }),
+    });
+    assert.equal(created.status, 201);
+    assert.equal(created.data.name, 'Facebook Bookmarked');
+    assert.equal(created.data.color, 'sky');
+    assert.deepEqual(created.data.rules.notebookPathPrefixes, ['Saved items / Facebook']);
+    const catId = created.data.id as string;
+
+    // Duplicate name rejected with 409
+    const dup = await app.api('/api/preferences/task-categories', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'facebook bookmarked' }),
+    });
+    assert.equal(dup.status, 409);
+
+    // Edit category name, color, and rules
+    const edited = await app.api(`/api/preferences/task-categories/${catId}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        name: 'FB Saved',
+        color: 'emerald',
+        rules: { sourceUrlPatterns: ['facebook.com', 'fb.watch'] },
+      }),
+    });
+    assert.equal(edited.status, 200);
+    assert.equal(edited.data.name, 'FB Saved');
+    assert.equal(edited.data.color, 'emerald');
+    assert.deepEqual(edited.data.rules, { sourceUrlPatterns: ['facebook.com', 'fb.watch'] });
+
+    // Assign and clear manual task category override
+    const todoKey = `todo-${demoId('note-todo-passport')}`;
+    const assign = await app.api('/api/preferences/task-categories/assignments', {
+      method: 'PUT',
+      body: JSON.stringify({ taskKey: todoKey, categoryId: catId }),
+    });
+    assert.equal(assign.status, 200);
+    assert.equal(assign.data.taskCategoryAssignments[todoKey], catId);
+
+    // Invalid taskKey rejected
+    const badKey = await app.api('/api/preferences/task-categories/assignments', {
+      method: 'PUT',
+      body: JSON.stringify({ taskKey: 'bad-key', categoryId: catId }),
+    });
+    assert.equal(badKey.status, 400);
+
+    // Hydrated preferences includes categories & assignments
+    const prefs = await app.api('/api/preferences');
+    assert.equal(prefs.status, 200);
+    assert.ok(prefs.data.taskCategories.some((c: any) => c.id === catId && c.name === 'FB Saved'));
+    assert.equal(prefs.data.taskCategoryAssignments[todoKey], catId);
+
+    // Deleting category removes it and cleans up dangling manual assignments
+    const del = await app.api(`/api/preferences/task-categories/${catId}`, { method: 'DELETE' });
+    assert.equal(del.status, 204);
+
+    const prefsAfter = await app.api('/api/preferences');
+    assert.equal(prefsAfter.status, 200);
+    assert.equal(prefsAfter.data.taskCategories.some((c: any) => c.id === catId), false);
+    assert.equal(prefsAfter.data.taskCategoryAssignments[todoKey], undefined);
+  });
+
   test('note detail includes ancestor notebookPath & backlinks, and notes list exposes tagIds', async () => {
     const res = await app.api(`/api/notes/${revTargetNoteId}`);
     assert.equal(res.status, 200);
@@ -306,6 +380,7 @@ describe('extended workspace API integration', () => {
     );
     assert.ok(inline);
     assert.equal(inline.notebookPath, 'Work');
+    assert.equal(inline.sourceUrl, 'https://github.com/example/repo');
     assert.equal(inline.checked, false);
 
     const stale = await app.api('/api/tasks/toggle', {

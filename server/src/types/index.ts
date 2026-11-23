@@ -438,6 +438,45 @@ export interface RecentReadEntry {
   readAt: number;
 }
 
+export type TaskCategoryColor =
+  | 'slate'
+  | 'terracotta'
+  | 'amber'
+  | 'emerald'
+  | 'sky'
+  | 'violet'
+  | 'rose';
+
+export interface TaskCategoryRules {
+  /** Exact notebook IDs to match (matches tasks inside those notebooks and their sub-notebooks) */
+  notebookIds?: string[];
+  /** Case-insensitive notebook path prefixes (e.g. "Saved items / Facebook") */
+  notebookPathPrefixes?: string[];
+  /** Case-insensitive substrings matched against note source_url (e.g. "facebook.com") */
+  sourceUrlPatterns?: string[];
+  /** Exact tag IDs to match */
+  tagIds?: string[];
+  /** Case-insensitive keywords matched against task title or note title */
+  keywords?: string[];
+  /** Optional task kind filter: "todo" or "inline" (omit for both) */
+  taskKind?: 'todo' | 'inline';
+}
+
+export interface TaskCategory {
+  id: string;
+  name: string;
+  color: TaskCategoryColor;
+  rules: TaskCategoryRules;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface TaskCategoryInput {
+  name: string;
+  color?: TaskCategoryColor;
+  rules?: TaskCategoryRules;
+}
+
 export interface UserPreferences {
   version: 1;
   favoriteNoteIds: string[];
@@ -445,6 +484,8 @@ export interface UserPreferences {
   savedSearches: SavedSearch[];
   recentReads: RecentReadEntry[];
   scratchpad: string;
+  taskCategories: TaskCategory[];
+  taskCategoryAssignments: Record<string, string>;
 }
 
 export interface FavoriteNotebookSummary {
@@ -461,6 +502,8 @@ export interface HydratedPreferences {
   savedSearches: SavedSearch[];
   recentReads: RecentReadEntry[];
   scratchpad: string;
+  taskCategories: TaskCategory[];
+  taskCategoryAssignments: Record<string, string>;
   favoriteNotes: NoteListItem[];
   favoriteNotebooks: FavoriteNotebookSummary[];
 }
@@ -512,6 +555,8 @@ export interface TodoTaskItem extends NoteListItem {
   notebookTitle: string;
   /** Full notebook hierarchy path (e.g. "Saved items / Facebook") */
   notebookPath?: string;
+  /** Note source_url property, when present (e.g. "https://www.facebook.com/reel/...") */
+  sourceUrl?: string;
 }
 
 export interface InlineTaskItem {
@@ -521,6 +566,8 @@ export interface InlineTaskItem {
   notebookTitle: string;
   /** Full notebook hierarchy path (e.g. "Saved items / Facebook") */
   notebookPath?: string;
+  /** Note source_url property, when present */
+  sourceUrl?: string;
   line: number;
   column: number;
   text: string;

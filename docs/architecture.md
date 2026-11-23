@@ -194,7 +194,9 @@ All routes except `/api/health`, `/api/auth/login`, `/api/auth/logout`, the pend
 | `DELETE` | `/api/preferences/saved-searches/:id` | Remove a saved search shortcut |
 | `POST` | `/api/preferences/recent-reads/:id` | Record a note read timestamp for *Recently Read* tracking |
 | `PUT` | `/api/preferences/scratchpad` | Persist workspace scratchpad text `{ scratchpad }` |
-| `GET` | `/api/tasks` | `{ todoNotes, inlineTasks }` combining Joplin to-do notes and interactive GFM checklist items across active notes, each including full `notebookPath` for Tasks Hub category filtering and grouping |
+| `POST` / `PUT` / `DELETE` | `/api/preferences/task-categories[/:id]` | Create, edit, or delete custom Tasks Hub categories (`{ name, color?, rules? }`) with auto-match rules (notebooks, import path prefixes, source URL patterns, tags, keywords, task kind) |
+| `PUT` | `/api/preferences/task-categories/assignments` | Set or clear a manual per-task category override `{ taskKey, categoryId: string \| null }` |
+| `GET` | `/api/tasks` | `{ todoNotes, inlineTasks }` combining Joplin to-do notes and interactive GFM checklist items across active notes, each including full `notebookPath` and `sourceUrl` for Tasks Hub category filtering, auto-matching, and grouping |
 | `POST` | `/api/tasks/toggle` | Conflict-checked toggle for an inline GFM checklist item `{ noteId, line, column, checked, baseUpdatedTime? }` (`409` if line moved) |
 | `GET` | `/api/ai/status` | `{ enabled, model?, transcribeEnabled, transcribeModel? }` AI availability for *Ask My Notes*, *Note Assist*, and *Voice Transcription* |
 | `POST` | `/api/ai/ask` | Grounded Q&A `{ question, scopeNotebookId?, scopeTagId? }` returning `{ answer, citations, usage? }` (`503` when disabled) |

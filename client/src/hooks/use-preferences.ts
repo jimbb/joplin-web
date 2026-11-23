@@ -1,17 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createSavedSearch,
+  createTaskCategory,
   deleteSavedSearch,
+  deleteTaskCategory,
   favoriteNote,
   favoriteNotebook,
   getPreferences,
   getRecentNotes,
   recordRecentRead,
   saveScratchpad,
+  setTaskCategoryAssignment,
   unfavoriteNote,
   unfavoriteNotebook,
+  updateTaskCategory,
 } from "@/lib/api";
-import { RecentNotesResponse, UserPreferences } from "@/lib/types";
+import { RecentNotesResponse, TaskCategoryInput, UserPreferences } from "@/lib/types";
 import { announceWrite } from "@/lib/cross-tab";
 
 export const PREFERENCES_QUERY_KEY = ["preferences"] as const;
@@ -101,6 +105,78 @@ export function useRecordRecentRead() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: RECENT_NOTES_QUERY_KEY, refetchType: "active" });
       queryClient.invalidateQueries({ queryKey: PREFERENCES_QUERY_KEY, refetchType: "none" });
+    },
+  });
+}
+
+export function useCreateTaskCategory() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: TaskCategoryInput) => createTaskCategory(input),
+    onSuccess: (created) => {
+      queryClient.setQueryData<UserPreferences>(PREFERENCES_QUERY_KEY, (prev) =>
+        prev ? { ...prev, taskCategories: [...prev.taskCategories, created] } : prev
+      );
+      queryClient.invalidateQueries({ queryKey: PREFERENCES_QUERY_KEY });
+      announceWrite();
+    },
+  });
+}
+
+export function useUpdateTaskCategory() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, patch }: { id: string; patch: Partial<TaskCategoryInput> }) =>
+      updateTaskCategory(id, patch),
+    onSuccess: (updated) => {
+      queryClient.setQueryData<UserPreferences>(PREFERENCES_QUERY_KEY, (prev) =>
+        prev
+          ? {
+              ...prev,
+              taskCategories: prev.taskCategories.map((c) => (c.id === updated.id ? updated : c)),
+            }
+          : prev
+      );
+      queryClient.invalidateQueries({ queryKey: PREFERENCES_QUERY_KEY });
+      announceWrite();
+    },
+  });
+}
+
+export function useDeleteTaskCategory() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => deleteTaskCategory(id),
+    onSuccess: (_void, id) => {
+      queryClient.setQueryData<UserPreferences>(PREFERENCES_QUERY_KEY, (prev) => {
+        if (!prev) return prev;
+        const nextAssignments: Record<string, string> = {};
+        for (const [taskKey, catId] of Object.entries(prev.taskCategoryAssignments)) {
+          if (catId !== id) nextAssignments[taskKey] = catId;
+        }
+        return {
+          ...prev,
+          taskCategories: prev.taskCategories.filter((c) => c.id !== id),
+          taskCategoryAssignments: nextAssignments,
+        };
+      });
+      queryClient.invalidateQueries({ queryKey: PREFERENCES_QUERY_KEY });
+      announceWrite();
+    },
+  });
+}
+
+export function useSetTaskCategoryAssignment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ taskKey, categoryId }: { taskKey: string; categoryId: string | null }) =>
+      setTaskCategoryAssignment(taskKey, categoryId),
+    onSuccess: ({ taskCategoryAssignments }) => {
+      queryClient.setQueryData<UserPreferences>(PREFERENCES_QUERY_KEY, (prev) =>
+        prev ? { ...prev, taskCategoryAssignments } : prev
+      );
+      queryClient.invalidateQueries({ queryKey: PREFERENCES_QUERY_KEY });
+      announceWrite();
     },
   });
 }
