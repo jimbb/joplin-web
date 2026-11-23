@@ -1848,16 +1848,31 @@ export class NoteCacheService {
 
     const todoNotes: TodoTaskItem[] = [];
     const inlineTasks: InlineTaskItem[] = [];
+    const notebookPathCache = new Map<string, string>();
+    const pathForNotebook = (parentId: string): string => {
+      if (!parentId) return '';
+      const cached = notebookPathCache.get(parentId);
+      if (cached !== undefined) return cached;
+      const resolved = this.notebookPathOf(entry, parentId)
+        .map((crumb) => crumb.title)
+        .filter(Boolean)
+        .join(' / ');
+      notebookPathCache.set(parentId, resolved);
+      return resolved;
+    };
 
     for (const note of entry.notes.values()) {
       if (!this.isNoteActive(note, deletedNotebookIds)) continue;
       const nb = note.parentId ? entry.notebooks.get(note.parentId) : null;
       const nbTitle = nb ? notebookTitle(nb) : '';
+      const nbPath = pathForNotebook(note.parentId || '');
+      const noteTagIds = tagIdsByNote.get(note.id);
 
       if (note.isTodo) {
         todoNotes.push({
           ...this.toNoteListItem(entry, note, tagIdsByNote),
           notebookTitle: nbTitle,
+          ...(nbPath ? { notebookPath: nbPath } : {}),
         });
       }
 
@@ -1868,11 +1883,13 @@ export class NoteCacheService {
             noteTitle: note.title || 'Untitled Note',
             parentId: note.parentId || '',
             notebookTitle: nbTitle,
+            ...(nbPath ? { notebookPath: nbPath } : {}),
             line: t.line,
             column: t.column,
             text: t.text,
             checked: t.checked,
             updatedTime: note.updatedTime,
+            ...(noteTagIds && noteTagIds.length > 0 ? { tagIds: noteTagIds } : {}),
           });
         }
       }

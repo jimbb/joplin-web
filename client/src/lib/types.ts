@@ -452,6 +452,8 @@ export interface NoteRevisionDetail {
 
 export interface TodoTaskItem extends NoteListItem {
   notebookTitle: string;
+  /** Full notebook hierarchy path (e.g. "Saved items / Facebook") */
+  notebookPath?: string;
 }
 
 export interface InlineTaskItem {
@@ -459,11 +461,15 @@ export interface InlineTaskItem {
   noteTitle: string;
   parentId: string;
   notebookTitle: string;
+  /** Full notebook hierarchy path (e.g. "Saved items / Facebook") */
+  notebookPath?: string;
   line: number;
   column: number;
   text: string;
   checked: boolean;
   updatedTime: number;
+  /** Linked tag ids of the parent note (omitted when untagged) */
+  tagIds?: string[];
 }
 
 export interface TasksResponse {

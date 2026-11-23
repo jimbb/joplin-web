@@ -294,10 +294,18 @@ describe('extended workspace API integration', () => {
     const listRes = await app.api('/api/tasks');
     assert.equal(listRes.status, 200);
     assert.ok(Array.isArray(listRes.data.todoNotes));
+    const nestedTodo = listRes.data.todoNotes.find((t: any) => t.id === demoId('note-todo-train'));
+    assert.ok(nestedTodo);
+    assert.equal(nestedTodo.notebookTitle, 'Travel');
+    assert.equal(nestedTodo.notebookPath, 'Personal / Travel');
+    const nestedInline = listRes.data.inlineTasks.find((t: any) => t.noteId === demoId('note-roadmap'));
+    assert.ok(nestedInline);
+    assert.equal(nestedInline.notebookPath, 'Work / Projects');
     const inline = listRes.data.inlineTasks.find(
       (t: any) => t.noteId === untaggedInlineTaskNoteId && t.text === 'Ship tasks hub'
     );
     assert.ok(inline);
+    assert.equal(inline.notebookPath, 'Work');
     assert.equal(inline.checked, false);
 
     const stale = await app.api('/api/tasks/toggle', {

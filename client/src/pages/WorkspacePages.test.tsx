@@ -313,6 +313,141 @@ describe("TasksPage", () => {
       expect(toast.warning).toHaveBeenCalledWith("Checklist moved since this list loaded; refreshed.")
     );
   });
+
+  it("filters, groups, and hides task categories including nested notebook paths", async () => {
+    const savedNbId = id("5");
+    const fbNbId = id("6");
+    const xNbId = id("7");
+    const noteDId = id("d");
+
+    mockBaseWorkspace((call) => {
+      if (call.path === "/api/notebooks") {
+        return jsonResponse([
+          workNb,
+          {
+            id: savedNbId,
+            title: "Saved items",
+            parentId: "",
+            noteCount: 0,
+            children: [
+              { id: fbNbId, title: "Facebook", parentId: savedNbId, children: [], noteCount: 2 },
+              { id: xNbId, title: "X @jimbb", parentId: savedNbId, children: [], noteCount: 1 },
+            ],
+          },
+        ]);
+      }
+      if (call.path === "/api/tasks") {
+        return jsonResponse({
+          todoNotes: [
+            {
+              id: noteAId,
+              parentId: fbNbId,
+              title: "FB Reel bookmark",
+              notebookTitle: "Facebook",
+              notebookPath: "Saved items / Facebook",
+              todoCompleted: false,
+              todoDue: 0,
+              updatedTime: 3000,
+            },
+            {
+              id: noteBId,
+              parentId: xNbId,
+              title: "X thread bookmark",
+              notebookTitle: "X @jimbb",
+              notebookPath: "Saved items / X @jimbb",
+              todoCompleted: false,
+              todoDue: 0,
+              updatedTime: 2500,
+            },
+          ],
+          inlineTasks: [
+            {
+              noteId: noteCId,
+              parentId: workNb.id,
+              noteTitle: "Launch Plan",
+              notebookTitle: "Work",
+              notebookPath: "Work",
+              text: "Verify DNS",
+              line: 4,
+              column: 1,
+              checked: false,
+              updatedTime: 2000,
+            },
+            {
+              noteId: noteDId,
+              parentId: fbNbId,
+              noteTitle: "FB Post",
+              notebookTitle: "Facebook",
+              notebookPath: "Saved items / Facebook",
+              text: "Try recipe",
+              line: 2,
+              column: 1,
+              checked: false,
+              updatedTime: 1800,
+            },
+          ],
+        });
+      }
+      return undefined;
+    });
+
+    renderWithProviders(<TasksPage />, { route: "/tasks" });
+
+    expect(await screen.findByText("FB Reel bookmark")).toBeTruthy();
+    expect(screen.getByText("X thread bookmark")).toBeTruthy();
+    expect(screen.getByText("Verify DNS")).toBeTruthy();
+
+    // Quick category filter pill filters to Saved items / Facebook and updates status counts
+    const categoryBar = screen.getByRole("group", { name: "Task categories" });
+    fireEvent.click(within(categoryBar).getByRole("button", { name: /Saved items \/ Facebook \(2\)/ }));
+    expect(screen.getByText("FB Reel bookmark")).toBeTruthy();
+    expect(screen.getByText("Try recipe")).toBeTruthy();
+    expect(screen.queryByText("Verify DNS")).toBeNull();
+    expect(screen.queryByText("X thread bookmark")).toBeNull();
+    expect(screen.getByRole("button", { name: "Open (2)" })).toBeTruthy();
+
+    // Categories popover lets the user pick a parent group (Saved items (all))
+    fireEvent.click(screen.getByRole("button", { name: "Choose task category" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Saved items \(all\)/ }));
+    expect(screen.getByText("FB Reel bookmark")).toBeTruthy();
+    expect(screen.getByText("X thread bookmark")).toBeTruthy();
+    expect(screen.queryByText("Verify DNS")).toBeNull();
+
+    // Return to All and hide Saved items (all) from All view
+    fireEvent.click(within(categoryBar).getByRole("button", { name: /^All \(4\)$/ }));
+    expect(screen.getByText("Verify DNS")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose task category" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Hide Saved items (all) from All" }));
+    expect(screen.queryByText("FB Reel bookmark")).toBeNull();
+    expect(screen.queryByText("X thread bookmark")).toBeNull();
+    expect(screen.getByText("Verify DNS")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open (1)" })).toBeTruthy();
+
+    // Explicitly selecting a hidden category still displays it with an unhide banner
+    fireEvent.click(screen.getByRole("button", { name: /^Saved items \/ Facebook/ }));
+    expect(screen.getByText("FB Reel bookmark")).toBeTruthy();
+    expect(screen.getByText("Hidden from All categories view.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show in All" }));
+    expect(screen.queryByText("Hidden from All categories view.")).toBeNull();
+
+    // Clear category and test Group by category with collapsible sections
+    fireEvent.click(screen.getByRole("button", { name: "Clear category filter" }));
+    fireEvent.click(screen.getByRole("button", { name: "Group" }));
+    const main = screen.getByRole("main");
+    const fbSectionBtn = within(main)
+      .getAllByRole("button", { name: /^Saved items \/ Facebook/ })
+      .find((btn) => btn.hasAttribute("aria-expanded"))!;
+    expect(fbSectionBtn.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(fbSectionBtn);
+    expect(fbSectionBtn.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("FB Reel bookmark")).toBeNull();
+    expect(screen.getByText("Verify DNS")).toBeTruthy();
+
+    // Scroll container locks horizontal overflow
+    const scroller = screen.getByTestId("tasks-scroll-container");
+    expect(scroller.className).toContain("overflow-x-hidden");
+  });
 });
 
 describe("HygienePage", () => {

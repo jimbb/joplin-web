@@ -23,3 +23,9 @@ export const EXPANDED_NOTEBOOKS_STORAGE_KEY = "joplin-sidebar-expanded-notebooks
 
 /** localStorage key holding whether the sidebar Tags section is explicitly expanded ("true"/"false") */
 export const TAGS_EXPANDED_STORAGE_KEY = "joplin-sidebar-tags-expanded";
+
+/** localStorage key holding whether Tasks Hub groups tasks by category ("true"/"false") */
+export const TASKS_GROUP_BY_CATEGORY_STORAGE_KEY = "joplin-tasks-group-by-category";
+
+/** localStorage key holding the JSON array of category keys hidden from Tasks Hub's All view */
+export const TASKS_HIDDEN_CATEGORIES_STORAGE_KEY = "joplin-tasks-hidden-categories";

@@ -253,6 +253,16 @@ test.describe("workspace features", () => {
     await expect(page).toHaveURL(/\/tasks$/);
     await expect(page.getByRole("heading", { level: 1, name: "Tasks Hub" })).toBeVisible();
     await expect(page.getByText("Renew passport")).toBeVisible();
+    // Filter by nested notebook category and toggle grouped view
+    await page.getByRole("button", { name: "Choose task category" }).click();
+    await page.getByRole("dialog").getByRole("button", { name: /^Work \/ Projects/ }).click();
+    await expect(page.getByText("Finish component library")).toBeVisible();
+    await expect(page.getByText("Renew passport")).toBeHidden();
+    await page.getByRole("button", { name: "Clear category filter" }).click();
+    await expect(page.getByText("Renew passport")).toBeVisible();
+    await page.getByRole("button", { name: "Group" }).click();
+    await expect(page.getByRole("button", { name: "Collapse all" })).toBeVisible();
+    await page.getByRole("button", { name: "Group" }).click();
 
     // Hygiene Triage
     await sidebar.getByRole("button", { name: "Hygiene", exact: true }).click();
@@ -280,11 +290,58 @@ test.describe("workspace features", () => {
     await expandSidebar(page.context());
     await signIn(page);
 
-    await page.getByRole("button", { name: "Toggle navigation menu" }).click();
-    const menu = page.getByRole("dialog", { name: "Navigation Menu" });
-    await menu.getByRole("button", { name: "Tasks", exact: true }).click();
-    await expect(menu).toBeHidden();
-    await expect(page).toHaveURL(/\/tasks$/);
-    await expect(page.getByRole("heading", { level: 1, name: "Tasks Hub" })).toBeVisible();
+    // Seed an inline checklist with a long unbroken URL & note title to verify zero horizontal overflow on mobile
+    const headers = { Origin: new URL(page.url()).origin };
+    const longUrl = `https://example.com/${"verylongsegment".repeat(12)}`;
+    const created = await page.request.post("/api/notes", {
+      headers,
+      data: {
+        title: `MobileOverflowCheck ${"LongNoteTitleSegment".repeat(4)}`,
+        parentId: demoId("nb-travel"),
+        body: `- [ ] Check link ${longUrl}`,
+      },
+    });
+    expect(created.ok()).toBeTruthy();
+    const { id: createdNoteId } = await created.json();
+
+    try {
+      await page.getByRole("button", { name: "Toggle navigation menu" }).click();
+      const menu = page.getByRole("dialog", { name: "Navigation Menu" });
+      await menu.getByRole("button", { name: "Tasks", exact: true }).click();
+      await expect(menu).toBeHidden();
+      await expect(page).toHaveURL(/\/tasks$/);
+      await expect(page.getByRole("heading", { level: 1, name: "Tasks Hub" })).toBeVisible();
+      await expect(page.getByText(`Check link ${longUrl}`)).toBeVisible();
+
+      const overflow = await page.evaluate(() => {
+        const doc = (
+          globalThis as unknown as {
+            document: {
+              documentElement: { scrollWidth: number; clientWidth: number };
+              querySelector: (selector: string) => {
+                scrollWidth: number;
+                clientWidth: number;
+                scrollLeft: number;
+              } | null;
+            };
+          }
+        ).document;
+        const scroller = doc.querySelector('[data-testid="tasks-scroll-container"]');
+        if (!scroller) return { missing: true, docOverflow: 0, scrollerOverflow: 0, scrollLeftAfter: 0 };
+        scroller.scrollLeft = 200;
+        return {
+          missing: false,
+          docOverflow: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+          scrollerOverflow: scroller.scrollWidth - scroller.clientWidth,
+          scrollLeftAfter: scroller.scrollLeft,
+        };
+      });
+      expect(overflow.missing).toBe(false);
+      expect(overflow.docOverflow).toBeLessThanOrEqual(0);
+      expect(overflow.scrollerOverflow).toBeLessThanOrEqual(0);
+      expect(overflow.scrollLeftAfter).toBe(0);
+    } finally {
+      await page.request.delete(`/api/notes/${createdNoteId}`, { headers });
+    }
   });
 });
