@@ -1010,7 +1010,9 @@ function normalizeSuggestedTitle(rawTitle: string, currentTitle: string, maxChar
   const sliced = finalTitle.slice(0, maxChars);
   const minSpace = Math.floor(maxChars * 0.6);
   const lastSpace = sliced.lastIndexOf(' ');
-  return (lastSpace >= minSpace ? sliced.slice(0, lastSpace) : sliced).trim();
+  const cut = (lastSpace >= minSpace ? sliced.slice(0, lastSpace) : sliced).trim();
+  // A cut right after a " – " separator (or "&", ",", "(") would leave it dangling at the end
+  return cut.replace(/[\s–—\-,&/:;(+]+$/u, '') || cut;
 }
 
 export interface ValidationOutcome {

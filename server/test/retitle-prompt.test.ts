@@ -25,3 +25,20 @@ test('retitle and uniqueness prompts carry the notebook path that names the card
   assert.match(uniqueness, /^notebook: OMYCard \/ Card 3215$/m);
   assert.match(buildTitleRule('standard'), /named in the current title or notebook path/);
 });
+
+test('a title cut to the length budget never ends on a dangling separator', async () => {
+  process.env.JOPLIN_SERVER_URL ??= 'http://127.0.0.1:9';
+  const { parseAndValidateRetitleSuggestion, TITLE_MAX_CHARS } = await import('../src/services/organizer.js');
+  const long = '2026-09-14 Inland Revenue Department – Business Registration Fee and Levy Exemption Notice – Hyperspark Limited 2026-27';
+  for (const sep of ['–', '&', ',']) {
+    const raw = long.replace(' – Hyperspark', ` ${sep} Hyperspark`);
+    const outcome = parseAndValidateRetitleSuggestion(JSON.stringify({ title: raw, confidence: 0.9, reason: 'r' }), {
+      currentTitle: '09172026094304',
+      titleDetail: 'standard',
+    });
+    assert.ok(outcome.ok);
+    const { title } = outcome.suggestion;
+    assert.ok(title.length <= TITLE_MAX_CHARS.standard, title);
+    assert.equal(title, '2026-09-14 Inland Revenue Department – Business Registration Fee and Levy Exemption Notice');
+  }
+});
