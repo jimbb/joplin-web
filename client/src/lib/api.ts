@@ -7,7 +7,6 @@ import {
   ClipResponse,
   EmailIngestResponse,
   HygieneReport,
-  ResolveDuplicateResponse,
   Notebook,
   NoteAssistAction,
   NoteAssistResponse,
@@ -1209,64 +1208,13 @@ export async function toggleInlineTask(payload: {
 export async function getHygieneReport(): Promise<HygieneReport> {
   const data = await request<Partial<HygieneReport> | unknown[] | null>("/api/organize/hygiene");
   if (!data || Array.isArray(data)) {
-    return {
-      duplicateClusters: [],
-      totalDuplicateClusters: 0,
-      identicalClusterCount: 0,
-      nearClusterCount: 0,
-      emptyNotes: [],
-      untaggedNotes: [],
-    };
+    return { duplicateClusters: [], emptyNotes: [], untaggedNotes: [] };
   }
-  const duplicateClusters = Array.isArray(data.duplicateClusters) ? data.duplicateClusters : [];
-  const identicalClusterCount =
-    typeof data.identicalClusterCount === "number"
-      ? data.identicalClusterCount
-      : duplicateClusters.filter((c) => c.tier === "identical").length;
-  const nearClusterCount =
-    typeof data.nearClusterCount === "number"
-      ? data.nearClusterCount
-      : duplicateClusters.filter((c) => c.tier === "near").length;
   return {
-    duplicateClusters,
-    totalDuplicateClusters:
-      typeof data.totalDuplicateClusters === "number" ? data.totalDuplicateClusters : duplicateClusters.length,
-    identicalClusterCount,
-    nearClusterCount,
+    duplicateClusters: Array.isArray(data.duplicateClusters) ? data.duplicateClusters : [],
     emptyNotes: Array.isArray(data.emptyNotes) ? data.emptyNotes : [],
     untaggedNotes: Array.isArray(data.untaggedNotes) ? data.untaggedNotes : [],
   };
-}
-
-export async function dismissDuplicatePair(payload: {
-  noteIds?: string[];
-  pairs?: Array<[string, string]>;
-}): Promise<{ dismissedCount: number; dismissedPairs: string[] }> {
-  return request<{ dismissedCount: number; dismissedPairs: string[] }>("/api/organize/hygiene/dismiss", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export async function undismissDuplicatePair(payload: {
-  noteIds?: string[];
-  pairs?: Array<[string, string]>;
-}): Promise<{ restoredCount: number; dismissedPairs: string[] }> {
-  return request<{ restoredCount: number; dismissedPairs: string[] }>("/api/organize/hygiene/undismiss", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export async function resolveDuplicateCluster(payload: {
-  keepNoteId: string;
-  trashNoteIds: string[];
-  mergeTags?: boolean;
-}): Promise<ResolveDuplicateResponse> {
-  return request<ResolveDuplicateResponse>("/api/organize/hygiene/resolve", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
 }
 
 export async function getAiStatus(): Promise<AiFeatureStatus> {

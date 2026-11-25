@@ -296,18 +296,6 @@ test.describe("workspace features", () => {
     await expect(page).toHaveURL(/\/hygiene$/);
     await expect(page.getByText("Duplicate clusters")).toBeVisible();
     await expect(page.getByText("Untagged notes", { exact: true })).toBeVisible();
-    await expect(page.getByText("Identical", { exact: true }).first()).toBeVisible();
-    await expect(page.getByText("Near match", { exact: true }).first()).toBeVisible();
-
-    // Open side-by-side compare modal on the near OCR scan cluster and verify diff highlights
-    const compareButtons = page.getByRole("button", { name: "Compare" });
-    await expect(compareButtons).toHaveCount(2);
-    await compareButtons.nth(1).click();
-    await expect(page.getByTestId("compare-pane-left")).toBeVisible();
-    await expect(page.getByTestId("compare-pane-right")).toBeVisible();
-    await expect(page.getByTestId("compare-word-diff")).toContainText("LlMITED");
-    await page.keyboard.press("Escape");
-    await expect(page.getByTestId("compare-pane-left")).toBeHidden();
 
     // Share target / Clip URL prefill + Email import
     await page.goto("/clip?url=https%3A%2F%2Fexample.org%2Fguide&title=Shared+Guide");

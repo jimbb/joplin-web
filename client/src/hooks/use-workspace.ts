@@ -2,7 +2,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   askNotes,
   clipUrl,
-  dismissDuplicatePair,
   getAiStatus,
   getHygieneReport,
   getNoteAttachments,
@@ -11,11 +10,9 @@ import {
   getTasks,
   ingestEmail,
   noteAssist,
-  resolveDuplicateCluster,
   restoreNoteRevision,
   runResourceOcr,
   toggleInlineTask,
-  undismissDuplicatePair,
 } from "@/lib/api";
 import {
   AiFeatureStatus,
@@ -70,38 +67,6 @@ export function useHygieneReport(enabled = true) {
     queryFn: getHygieneReport,
     staleTime: 30 * 1000,
     enabled,
-  });
-}
-
-export function useDismissDuplicates() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (payload: { noteIds?: string[]; pairs?: Array<[string, string]> }) => dismissDuplicatePair(payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: HYGIENE_QUERY_KEY });
-    },
-  });
-}
-
-export function useUndismissDuplicates() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (payload: { noteIds?: string[]; pairs?: Array<[string, string]> }) => undismissDuplicatePair(payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: HYGIENE_QUERY_KEY });
-    },
-  });
-}
-
-export function useResolveDuplicates() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (payload: { keepNoteId: string; trashNoteIds: string[]; mergeTags?: boolean }) =>
-      resolveDuplicateCluster(payload),
-    onSuccess: () => {
-      invalidateLists(queryClient);
-      queryClient.invalidateQueries({ queryKey: ["note"] });
-    },
   });
 }
 

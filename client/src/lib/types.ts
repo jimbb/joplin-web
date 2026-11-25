@@ -522,50 +522,22 @@ export interface TasksResponse {
   inlineTasks: InlineTaskItem[];
 }
 
-export type DuplicateTier = "identical" | "near";
-
-export interface HygieneNoteAttachment {
-  id: string;
-  name: string;
-  mime: string;
-  size: number;
-  kind: NoteAttachmentKind;
-  hasOcr: boolean;
-}
-
 export interface HygieneNoteItem extends NoteListItem {
   notebookTitle: string;
-  notebookPath?: string;
   previewLength?: number;
-  tagCount?: number;
-  tags?: Array<{ id: string; title: string }>;
-  attachments?: HygieneNoteAttachment[];
-  ocrTextLength?: number;
 }
 
 export interface DuplicateCluster {
   id: string;
-  tier: DuplicateTier;
+  reason: "exact-title" | "similar-content";
   score: number;
-  evidence: string;
-  suggestedKeeperId: string;
   notes: HygieneNoteItem[];
 }
 
 export interface HygieneReport {
   duplicateClusters: DuplicateCluster[];
-  totalDuplicateClusters: number;
-  identicalClusterCount: number;
-  nearClusterCount: number;
   emptyNotes: HygieneNoteItem[];
   untaggedNotes: HygieneNoteItem[];
-}
-
-export interface ResolveDuplicateResponse {
-  keepNoteId: string;
-  trashedNoteIds: string[];
-  mergedTags: string[];
-  results: BatchNoteResult[];
 }
 
 export interface AiFeatureStatus {

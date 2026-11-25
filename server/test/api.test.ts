@@ -236,7 +236,7 @@ describe('reading', () => {
     const importantNotes = await api(`/api/notes?tag_id=${demoId('tag-important')}`);
     assert.equal(importantNotes.status, 200);
     assert.deepEqual(
-      importantNotes.data.map((n: any) => n.id).filter((id: string) => id !== demoId('note-water-bill')),
+      importantNotes.data.map((n: any) => n.id),
       [demoId('note-roadmap')],
       'important tag list excludes Renew passport to-do'
     );
@@ -250,7 +250,7 @@ describe('reading', () => {
 
     const tags = await api('/api/tags');
     const importantTag = tags.data.find((t: any) => t.id === demoId('tag-important'));
-    assert.equal(importantTag.noteCount, 2, 'roadmap + hygiene demo water bill, not the passport to-do');
+    assert.equal(importantTag.noteCount, 1);
 
     // Recent (both recentRead and recentCreated) excludes to-dos
     await api(`/api/preferences/recent-reads/${demoId('note-todo-passport')}`, { method: 'POST' });
@@ -1029,117 +1029,6 @@ describe('security', () => {
 
     const retryRes = await api(`/api/organize/jobs/${'a'.repeat(32)}/retry`, { method: 'POST' });
     assert.equal(retryRes.status, 503);
-  });
-
-  test('hygiene report returns tiered content clusters, supports dismiss/undismiss and resolve with tag merge', async () => {
-    const initial = await api('/api/organize/hygiene');
-    assert.equal(initial.status, 200);
-    assert.equal(typeof initial.data.totalDuplicateClusters, 'number');
-    assert.equal(typeof initial.data.identicalClusterCount, 'number');
-    assert.equal(typeof initial.data.nearClusterCount, 'number');
-    assert.ok(Array.isArray(initial.data.duplicateClusters));
-    assert.ok(initial.data.identicalClusterCount >= 1, 'demo seed includes an identical cluster');
-    assert.ok(initial.data.nearClusterCount >= 1, 'demo seed includes a near OCR scan cluster');
-
-    // Identical clusters are ordered before near clusters, and exact-title is never returned
-    const tiers = initial.data.duplicateClusters.map((c: any) => c.tier);
-    const firstNear = tiers.indexOf('near');
-    const lastIdentical = tiers.lastIndexOf('identical');
-    assert.ok(firstNear === -1 || lastIdentical < firstNear, 'identical clusters must come first');
-    for (const c of initial.data.duplicateClusters) {
-      assert.ok(c.tier === 'identical' || c.tier === 'near');
-      assert.equal(c.reason, undefined, 'legacy exact-title/reason field should be removed');
-      assert.ok(typeof c.evidence === 'string' && c.evidence.length > 0);
-      assert.ok(typeof c.suggestedKeeperId === 'string' && c.suggestedKeeperId.length === 32);
-    }
-
-    // Tier & pagination query params
-    const onlyIdentical = await api('/api/organize/hygiene?tier=identical&offset=0&limit=1');
-    assert.equal(onlyIdentical.status, 200);
-    assert.equal(onlyIdentical.data.duplicateClusters.length, 1);
-    assert.equal(onlyIdentical.data.duplicateClusters[0].tier, 'identical');
-
-    // Dismiss the near cluster pair and verify it disappears, then undismiss and verify it returns
-    const nearCluster = initial.data.duplicateClusters.find((c: any) => c.tier === 'near');
-    assert.ok(nearCluster);
-    const nearIds = nearCluster.notes.map((n: any) => n.id);
-    const dismissRes = await api('/api/organize/hygiene/dismiss', {
-      method: 'POST',
-      body: JSON.stringify({ noteIds: nearIds }),
-    });
-    assert.equal(dismissRes.status, 200);
-    assert.ok(dismissRes.data.dismissedCount >= 1);
-
-    const afterDismiss = await api('/api/organize/hygiene');
-    assert.equal(afterDismiss.status, 200);
-    assert.ok(
-      !afterDismiss.data.duplicateClusters.some((c: any) => c.notes.some((n: any) => n.id === nearIds[0])),
-      'dismissed pair must stay out of hygiene report'
-    );
-
-    const undismissRes = await api('/api/organize/hygiene/undismiss', {
-      method: 'POST',
-      body: JSON.stringify({ noteIds: nearIds }),
-    });
-    assert.equal(undismissRes.status, 200);
-    const afterUndismiss = await api('/api/organize/hygiene');
-    assert.ok(
-      afterUndismiss.data.duplicateClusters.some((c: any) => c.notes.some((n: any) => n.id === nearIds[0])),
-      'undismissed pair should reappear'
-    );
-
-    // Create two fresh duplicate notes with distinct tags to test resolve (keep + trash + mergeTags)
-    const body = 'Project postmortem detailing root cause analysis, mitigation timeline, and follow-up engineering tasks.';
-    const keepCreate = await api('/api/notes', {
-      method: 'POST',
-      body: JSON.stringify({ title: 'Postmortem Keeper', body, parentId: demoId('nb-projects') }),
-    });
-    const dupCreate = await api('/api/notes', {
-      method: 'POST',
-      body: JSON.stringify({ title: 'Postmortem Copy', body, parentId: demoId('nb-work') }),
-    });
-    assert.equal(keepCreate.status, 201);
-    assert.equal(dupCreate.status, 201);
-    const keepId = keepCreate.data.id as string;
-    const dupId = dupCreate.data.id as string;
-
-    await api(`/api/notes/${keepId}/tags`, { method: 'POST', body: JSON.stringify({ title: 'planning' }) });
-    await api(`/api/notes/${dupId}/tags`, { method: 'POST', body: JSON.stringify({ title: 'ideas' }) });
-    await api(`/api/notes/${dupId}/tags`, { method: 'POST', body: JSON.stringify({ title: 'planning' }) });
-
-    const resolveRes = await api('/api/organize/hygiene/resolve', {
-      method: 'POST',
-      body: JSON.stringify({ keepNoteId: keepId, trashNoteIds: [dupId], mergeTags: true }),
-    });
-    assert.equal(resolveRes.status, 200);
-    assert.equal(resolveRes.data.keepNoteId, keepId);
-    assert.deepEqual(resolveRes.data.trashedNoteIds, [dupId]);
-    assert.deepEqual(resolveRes.data.mergedTags, ['ideas']);
-
-    const keptNote = await api(`/api/notes/${keepId}`);
-    assert.equal(keptNote.status, 200);
-    const keptTagTitles = keptNote.data.tags.map((t: any) => t.title).sort();
-    assert.deepEqual(keptTagTitles, ['ideas', 'planning']);
-
-    const trashedNote = await api(`/api/notes/${dupId}`);
-    assert.equal(trashedNote.status, 200);
-    assert.ok(trashedNote.data.deletedTime > 0, 'duplicate copy must be in trash');
-
-    // A trashed keeper must not take its copies with it
-    const restoreDup = await api(`/api/notes/${dupId}/restore`, { method: 'POST' });
-    assert.equal(restoreDup.status, 200);
-    await api(`/api/notes/${keepId}`, { method: 'DELETE' });
-    const trashedKeeperRes = await api('/api/organize/hygiene/resolve', {
-      method: 'POST',
-      body: JSON.stringify({ keepNoteId: keepId, trashNoteIds: [dupId], mergeTags: false }),
-    });
-    assert.equal(trashedKeeperRes.status, 409);
-    assert.equal((await api(`/api/notes/${dupId}`)).data.deletedTime, 0, 'copy stays when the keeper is trashed');
-
-    // Clean up created notes so subsequent tests stay unaffected
-    await api(`/api/notes/${dupId}`, { method: 'DELETE' });
-    await api(`/api/notes/${keepId}?permanent=true`, { method: 'DELETE' });
-    await api(`/api/notes/${dupId}?permanent=true`, { method: 'DELETE' });
   });
 });
 
