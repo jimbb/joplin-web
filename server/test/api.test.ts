@@ -236,7 +236,7 @@ describe('reading', () => {
     const importantNotes = await api(`/api/notes?tag_id=${demoId('tag-important')}`);
     assert.equal(importantNotes.status, 200);
     assert.deepEqual(
-      importantNotes.data.map((n: any) => n.id),
+      importantNotes.data.map((n: any) => n.id).filter((id: string) => id !== demoId('note-water-bill')),
       [demoId('note-roadmap')],
       'important tag list excludes Renew passport to-do'
     );

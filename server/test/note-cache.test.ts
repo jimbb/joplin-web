@@ -406,7 +406,8 @@ describe('derived counts', () => {
       assert.equal(tag.noteCount, expected, tag.title);
     }
     assert.equal(tags.find((t) => t.title === 'cooking')?.noteCount, 2);
-    assert.equal(tags.find((t) => t.title === 'important')?.noteCount, 1);
+    // roadmap + the hygiene demo's water bill; the Renew passport to-do is not counted
+    assert.equal(tags.find((t) => t.title === 'important')?.noteCount, 2);
   });
 });
 
