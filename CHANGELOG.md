@@ -7,6 +7,7 @@ Notable changes to Joplin Web. The format follows [Keep a Changelog](https://kee
 ### Features
 
 - **Install as an app:** Joplin Web is a Progressive Web App with its own icon. Install it from Chrome or Edge, or add it to the Home Screen on iPhone and iPad, and it opens in its own window. The title bar follows the light/dark theme, and an offline page replaces the browser's error when the server can't be reached. No notes are stored for offline use.
+- **Sort search results:** search results have a sort menu. *Relevance* is the default, listing notes that match in the title first, then in the body, then in attachments. *Updated date*, *Created date* and *Title* are also available, and the choice is remembered. A notebook or tag list's filter box ranks its matches the same way while it has text, and the list's own sort comes back when the filter is cleared.
 
 ### Changed
 

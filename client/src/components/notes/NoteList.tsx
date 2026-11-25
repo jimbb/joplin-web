@@ -9,7 +9,6 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
-  ArrowDownUp,
   Check,
   CheckSquare,
   Columns3,
@@ -33,10 +32,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -49,6 +44,19 @@ import { BulkUpdateProgress } from "@/hooks/use-mutations";
 import { useSearch } from "@/hooks/use-search";
 import { useTags } from "@/hooks/use-tags";
 import { TitleDetailControl, useTitleDetail } from "@/components/organize/TitleDetailControl";
+import { NoteSortMenu } from "./NoteSortMenu";
+import {
+  DEFAULT_LIST_SORT,
+  DEFAULT_SEARCH_SORT,
+  LIST_SORT_FIELDS,
+  LIST_SORT_STORAGE_KEY,
+  SEARCH_SORT_FIELDS,
+  SEARCH_SORT_STORAGE_KEY,
+  SortChoice,
+  loadSort,
+  saveSort,
+  sortNotes,
+} from "@/lib/note-sort";
 
 export { NOTE_LIST_PAGE_SIZE } from "@/lib/ui-constants";
 
@@ -98,8 +106,6 @@ interface NoteListProps {
   favoriteNoteIds?: ReadonlySet<string>;
 }
 
-type SortField = "updated" | "created" | "title";
-type SortOrder = "asc" | "desc";
 type CollectionViewMode = "list" | "gallery" | "table" | "board";
 
 function loadViewMode(): CollectionViewMode {
@@ -120,54 +126,11 @@ function saveViewMode(mode: CollectionViewMode) {
   }
 }
 
-const SORT_FIELD_LABELS: Record<SortField, string> = {
-  updated: "Updated date",
-  created: "Created date",
-  title: "Title",
-};
-
-const SORT_STORAGE_KEY = "joplin-note-sort";
-
-interface SortChoice {
-  field: SortField;
-  order: SortOrder;
-}
-
-/** The remembered sort, so it survives switching lists (the list remounts) and reloads */
-function loadSort(): SortChoice {
-  try {
-    const stored = JSON.parse(localStorage.getItem(SORT_STORAGE_KEY) ?? "null");
-    if (
-      stored &&
-      (stored.field === "updated" || stored.field === "created" || stored.field === "title") &&
-      (stored.order === "asc" || stored.order === "desc")
-    ) {
-      return stored;
-    }
-  } catch {
-    // storage unavailable or invalid
-  }
-  return { field: "updated", order: "desc" };
-}
-
-function saveSort(sort: SortChoice) {
-  try {
-    localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(sort));
-  } catch {
-    // storage unavailable
-  }
-}
-
-/** Direction labels that fit the field: A-Z for titles, newest/oldest for dates */
-function orderLabel(field: SortField, order: SortOrder): string {
-  if (field === "title") return order === "asc" ? "A–Z" : "Z–A";
-  return order === "desc" ? "Newest first" : "Oldest first";
-}
-
 /**
  * Middle column: the notes of the selected notebook, tag, trash or all notes, with a local
  * filter and sort. Remount it (via `key`) when the list changes so the filter doesn't carry over;
- * the sort choice is remembered in localStorage and stays.
+ * the sort choice is remembered in localStorage and stays. While the filter has text the list uses
+ * the search results' sort, Relevance by default.
  */
 export function NoteList({
   notes = [],
@@ -203,9 +166,15 @@ export function NoteList({
   favoriteNoteIds,
 }: NoteListProps) {
   const [filterText, setFilterText] = useState("");
-  const [sort, setSort] = useState<SortChoice>(loadSort);
+  const [listSort, setListSort] = useState<SortChoice>(() =>
+    loadSort(LIST_SORT_STORAGE_KEY, DEFAULT_LIST_SORT, LIST_SORT_FIELDS)
+  );
+  const [searchSort, setSearchSort] = useState<SortChoice>(() =>
+    loadSort(SEARCH_SORT_STORAGE_KEY, DEFAULT_SEARCH_SORT, SEARCH_SORT_FIELDS)
+  );
   const [viewMode, setViewMode] = useState<CollectionViewMode>(loadViewMode);
-  const { field: sortField, order: sortOrder } = sort;
+  const isFiltering = filterText.trim().length > 0;
+  const sort = isFiltering ? searchSort : listSort;
   const [renderLimit, setRenderLimit] = useState(NOTE_LIST_PAGE_SIZE);
   const [moveOpen, setMoveOpen] = useState(false);
   const [moveFilter, setMoveFilter] = useState("");
@@ -215,15 +184,18 @@ export function NoteList({
 
   const { data: fetchedTags } = useTags(tagsProp === undefined && viewMode === "board");
   // The filter also keeps notes the full-text search finds (body and attachment OCR), not just
-  // title/preview matches; hits from a query older than the current text are ignored
+  // title/preview matches; hits from a query older than the current text are ignored.
+  // Each hit maps to its rank in the search results, which orders the list by Relevance.
   const search = useSearch(filterText);
-  const searchHitIds = useMemo(
+  const searchHitRanks = useMemo(
     () =>
-      search.debouncedQuery === filterText.trim() && search.data ? new Set(search.data.map((r) => r.id)) : null,
+      search.debouncedQuery === filterText.trim() && search.data
+        ? new Map(search.data.map((r, i) => [r.id, i]))
+        : null,
     [search.debouncedQuery, search.data, filterText]
   );
   // Waiting for the full-text search of the current text (including the debounce)
-  const isSearchPending = filterText.trim().length >= 2 && searchHitIds === null && !search.error;
+  const isSearchPending = filterText.trim().length >= 2 && searchHitRanks === null && !search.error;
   const availableTags = useMemo(() => tagsProp ?? fetchedTags ?? [], [tagsProp, fetchedTags]);
 
   const localSelection = useNoteSelection();
@@ -241,8 +213,13 @@ export function NoteList({
   }
 
   const updateSort = (next: SortChoice) => {
-    setSort(next);
-    saveSort(next);
+    if (isFiltering) {
+      setSearchSort(next);
+      saveSort(SEARCH_SORT_STORAGE_KEY, next);
+    } else {
+      setListSort(next);
+      saveSort(LIST_SORT_STORAGE_KEY, next);
+    }
   };
 
   const updateViewMode = (next: CollectionViewMode) => {
@@ -251,30 +228,29 @@ export function NoteList({
   };
 
   const filteredAndSortedNotes = useMemo(() => {
-    let result = [...notes];
+    if (!filterText.trim()) return sortNotes(notes, sort);
 
-    if (filterText.trim()) {
-      const q = filterText.toLowerCase();
-      result = result.filter(
-        (n) =>
-          n.title.toLowerCase().includes(q) ||
-          (n.preview && n.preview.toLowerCase().includes(q)) ||
-          Boolean(searchHitIds?.has(n.id))
-      );
-    }
-
-    result.sort((a, b) => {
-      if (sortField === "title") {
-        const comp = a.title.localeCompare(b.title);
-        return sortOrder === "asc" ? comp : -comp;
+    const q = filterText.toLowerCase();
+    const titleHits = new Set<string>();
+    const result = notes.filter((n) => {
+      if (n.title.toLowerCase().includes(q)) {
+        titleHits.add(n.id);
+        return true;
       }
-      const timeA = (sortField === "created" ? a.createdTime : a.updatedTime) || 0;
-      const timeB = (sortField === "created" ? b.createdTime : b.updatedTime) || 0;
-      return sortOrder === "asc" ? timeA - timeB : timeB - timeA;
+      return (n.preview && n.preview.toLowerCase().includes(q)) || Boolean(searchHitRanks?.has(n.id));
     });
 
-    return result;
-  }, [notes, filterText, searchHitIds, sortField, sortOrder]);
+    // Relevance: the search's ranking first; notes it didn't return (still searching, or Trash and
+    // Conflicts, which search skips) follow with title matches first, then the newest
+    return sortNotes(result, sort, (a, b) => {
+      const rankA = searchHitRanks?.get(a.id) ?? Infinity;
+      const rankB = searchHitRanks?.get(b.id) ?? Infinity;
+      if (rankA !== rankB) return rankA < rankB ? -1 : 1;
+      const titleA = titleHits.has(a.id);
+      if (titleA !== titleHits.has(b.id)) return titleA ? -1 : 1;
+      return (b.updatedTime || 0) - (a.updatedTime || 0);
+    });
+  }, [notes, filterText, searchHitRanks, sort]);
 
   // Once per list (it remounts per notebook/tag), so closing the note doesn't reopen one
   const openedFirst = useRef(false);
@@ -454,14 +430,6 @@ export function NoteList({
     onBulkAddTag?.(selectedNotes, trimmed);
   };
 
-  const changeSortField = (field: SortField) => {
-    if (field === sortField) return;
-    // Titles read naturally A-Z, dates newest first
-    updateSort({ field, order: field === "title" ? "asc" : "desc" });
-  };
-
-  const sortDescription = `${SORT_FIELD_LABELS[sortField]}, ${orderLabel(sortField, sortOrder)}`;
-  const isFiltering = filterText.trim().length > 0;
   const showSelectToggle = canSelect && !isLoading && !error && (notes.length > 0 || isSelecting);
 
   return (
@@ -500,37 +468,11 @@ export function NoteList({
               </Button>
             )}
 
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                  aria-label={`Sort notes (${sortDescription})`}
-                  title={`Sorted by ${sortDescription}`}
-                >
-                  <ArrowDownUp className="h-3.5 w-3.5" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-44 text-xs">
-                <DropdownMenuLabel className="text-xs text-muted-foreground font-medium">Sort by</DropdownMenuLabel>
-                <DropdownMenuRadioGroup value={sortField} onValueChange={(v) => changeSortField(v as SortField)}>
-                  {(Object.keys(SORT_FIELD_LABELS) as SortField[]).map((field) => (
-                    <DropdownMenuRadioItem key={field} value={field}>
-                      {SORT_FIELD_LABELS[field]}
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
-                <DropdownMenuSeparator />
-                <DropdownMenuRadioGroup value={sortOrder} onValueChange={(v) => updateSort({ field: sortField, order: v as SortOrder })}>
-                  {(sortField === "title" ? (["asc", "desc"] as const) : (["desc", "asc"] as const)).map((order) => (
-                    <DropdownMenuRadioItem key={order} value={order}>
-                      {orderLabel(sortField, order)}
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <NoteSortMenu
+              sort={sort}
+              onChange={updateSort}
+              fields={isFiltering ? SEARCH_SORT_FIELDS : LIST_SORT_FIELDS}
+            />
 
             {onCreateNote && (
               <DropdownMenu>

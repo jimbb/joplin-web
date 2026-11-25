@@ -322,4 +322,30 @@ describe("NoteList filter", () => {
     await waitFor(() => expect(screen.getByText("No matches")).toBeTruthy());
     expect(screen.getByText("0 notes")).toBeTruthy();
   });
+
+  it("ranks filter matches by Relevance, with a sort of its own that leaves the list's sort alone", async () => {
+    localStorage.clear();
+    // Note 1 is the newest; the search ranks Note 3 first and doesn't return Note 2 (it matches by title only)
+    const notes = makeNotes(3);
+    mockFetch((c) => (c.path.startsWith("/api/search") ? jsonResponse([notes[2], notes[0]]) : undefined));
+    renderWithProviders(<NoteList notes={notes} notebooks={notebooks} onSelectNote={vi.fn()} />);
+    const order = () => screen.getAllByText(/^Note \d$/).map((el) => el.textContent);
+    const filter = screen.getByRole("textbox", { name: "Filter this list" });
+
+    expect(screen.getByRole("button", { name: "Sort notes (Updated date, Newest first)" })).toBeTruthy();
+    expect(order()).toEqual(["Note 1", "Note 2", "Note 3"]);
+
+    fireEvent.change(filter, { target: { value: "note" } });
+    await waitFor(() => expect(order()).toEqual(["Note 3", "Note 1", "Note 2"]));
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Sort notes (Relevance)" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: "Created date" }));
+    expect(order()).toEqual(["Note 1", "Note 2", "Note 3"]);
+    expect(JSON.parse(localStorage.getItem("joplin-search-sort") ?? "null")).toEqual({ field: "created", order: "desc" });
+
+    fireEvent.change(filter, { target: { value: "" } });
+    expect(screen.getByRole("button", { name: "Sort notes (Updated date, Newest first)" })).toBeTruthy();
+    expect(localStorage.getItem("joplin-note-sort")).toBeNull();
+    localStorage.clear();
+  });
 });

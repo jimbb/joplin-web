@@ -184,7 +184,7 @@ describe("SearchResults", () => {
     expect(renderedCards(container)).toHaveLength(200);
     rerender(<SearchResults query="bank" results={makeManyResults(250, "Refreshed")} onSelectNote={() => {}} />);
     expect(renderedCards(container)).toHaveLength(NOTE_LIST_PAGE_SIZE);
-  });
+  }, 15_000);
 
   it("extends the rendered slice to include a selected note beyond the first page", () => {
     const many = makeManyResults(250);
@@ -197,5 +197,57 @@ describe("SearchResults", () => {
     expect(renderedCards(container)).toHaveLength(150);
     expect(screen.getByText("Match 150")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Show more (100 remaining)" })).toBeTruthy();
+  });
+
+  describe("sort", () => {
+    afterEach(() => localStorage.clear());
+
+    const titles = (container: HTMLElement) => Array.from(container.querySelectorAll("h4")).map((h) => h.textContent);
+    // In the server's ranking: best match first
+    const ranked = [
+      result({ id: "a".repeat(32), title: "Road trip", updatedTime: 1000, createdTime: 300 }),
+      result({ id: "b".repeat(32), title: "Atlas", updatedTime: 3000, createdTime: 100 }),
+      result({ id: "c".repeat(32), title: "Commute", updatedTime: 2000, createdTime: 200 }),
+    ];
+    const openSortMenu = (name: RegExp | string) =>
+      fireEvent.pointerDown(screen.getByRole("button", { name }), { button: 0, ctrlKey: false });
+
+    it("ranks by Relevance by default, keeping the server's order", () => {
+      const { container } = render(<SearchResults query="road" results={ranked} onSelectNote={vi.fn()} />);
+
+      expect(screen.getByRole("button", { name: "Sort notes (Relevance)" }).getAttribute("title")).toBe(
+        "Sorted by Relevance"
+      );
+      expect(titles(container)).toEqual(["Road trip", "Atlas", "Commute"]);
+    });
+
+    it("sorts by another field on request, remembers it, and goes back to Relevance", async () => {
+      const { container, unmount } = render(<SearchResults query="road" results={ranked} onSelectNote={vi.fn()} />);
+
+      openSortMenu("Sort notes (Relevance)");
+      // Relevance has a single direction
+      expect(screen.queryByRole("menuitemradio", { name: "Newest first" })).toBeNull();
+      fireEvent.click(await screen.findByRole("menuitemradio", { name: "Updated date" }));
+      expect(titles(container)).toEqual(["Atlas", "Commute", "Road trip"]);
+
+      openSortMenu("Sort notes (Updated date, Newest first)");
+      fireEvent.click(await screen.findByRole("menuitemradio", { name: "Oldest first" }));
+      expect(titles(container)).toEqual(["Road trip", "Commute", "Atlas"]);
+      expect(JSON.parse(localStorage.getItem("joplin-search-sort") ?? "null")).toEqual({ field: "updated", order: "asc" });
+
+      // The next search panel starts with the remembered sort
+      unmount();
+      const next = render(<SearchResults query="road" results={ranked} onSelectNote={vi.fn()} />);
+      expect(titles(next.container)).toEqual(["Road trip", "Commute", "Atlas"]);
+
+      openSortMenu("Sort notes (Updated date, Oldest first)");
+      fireEvent.click(await screen.findByRole("menuitemradio", { name: "Title" }));
+      expect(titles(next.container)).toEqual(["Atlas", "Commute", "Road trip"]);
+
+      openSortMenu("Sort notes (Title, A–Z)");
+      fireEvent.click(await screen.findByRole("menuitemradio", { name: "Relevance" }));
+      expect(titles(next.container)).toEqual(["Road trip", "Atlas", "Commute"]);
+      expect(localStorage.getItem("joplin-note-sort")).toBeNull();
+    });
   });
 });

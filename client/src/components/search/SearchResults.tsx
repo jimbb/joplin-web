@@ -9,6 +9,16 @@ import { formatRelativeTime } from "@/lib/format";
 import { QueryError } from "@/components/common/QueryError";
 import { NOTE_LIST_PAGE_SIZE, SEARCH_SYNTAX_HINT } from "@/lib/ui-constants";
 import { PromptDialog } from "@/components/common/Dialogs";
+import { NoteSortMenu } from "@/components/notes/NoteSortMenu";
+import {
+  DEFAULT_SEARCH_SORT,
+  SEARCH_SORT_FIELDS,
+  SEARCH_SORT_STORAGE_KEY,
+  SortChoice,
+  loadSort,
+  saveSort,
+  sortNotes,
+} from "@/lib/note-sort";
 
 interface SearchResultsProps {
   query: string;
@@ -68,6 +78,10 @@ export function HighlightedText({
   );
 }
 
+/**
+ * Middle column while a search runs: the matches, ranked by Relevance (the server's order) unless
+ * another sort is picked; the sort is remembered in localStorage.
+ */
 export function SearchResults({
   query,
   results,
@@ -83,24 +97,39 @@ export function SearchResults({
 }: SearchResultsProps) {
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
   const [renderLimit, setRenderLimit] = useState(NOTE_LIST_PAGE_SIZE);
+  const [sort, setSort] = useState<SortChoice>(() =>
+    loadSort(SEARCH_SORT_STORAGE_KEY, DEFAULT_SEARCH_SORT, SEARCH_SORT_FIELDS)
+  );
 
-  // Reset the progressive slice when the query or result list changes (synchronously during render)
+  // Reset the progressive slice when the query, result list or sort changes (synchronously during render)
   const [prevQuery, setPrevQuery] = useState(query);
   const [prevResults, setPrevResults] = useState(results);
-  if (query !== prevQuery || (results !== prevResults && (results.length > 0 || prevResults.length > 0))) {
+  const [prevSort, setPrevSort] = useState(sort);
+  if (
+    query !== prevQuery ||
+    sort !== prevSort ||
+    (results !== prevResults && (results.length > 0 || prevResults.length > 0))
+  ) {
     setPrevQuery(query);
     setPrevResults(results);
+    setPrevSort(sort);
     if (renderLimit !== NOTE_LIST_PAGE_SIZE) {
       setRenderLimit(NOTE_LIST_PAGE_SIZE);
     }
   }
 
-  const activeIndex = selectedNoteId ? results.findIndex((n) => n.id === selectedNoteId) : -1;
+  const updateSort = (next: SortChoice) => {
+    setSort(next);
+    saveSort(SEARCH_SORT_STORAGE_KEY, next);
+  };
+
+  const sortedResults = useMemo(() => sortNotes(results, sort), [results, sort]);
+  const activeIndex = selectedNoteId ? sortedResults.findIndex((n) => n.id === selectedNoteId) : -1;
   const visibleCount = Math.min(
-    results.length,
+    sortedResults.length,
     Math.max(renderLimit, activeIndex >= 0 ? activeIndex + 1 : 0)
   );
-  const visibleResults = useMemo(() => results.slice(0, visibleCount), [results, visibleCount]);
+  const visibleResults = useMemo(() => sortedResults.slice(0, visibleCount), [sortedResults, visibleCount]);
 
   return (
     <div className="flex flex-col h-full bg-background border-r border-border">
@@ -120,6 +149,7 @@ export function SearchResults({
           <span className="text-xs text-muted-foreground font-mono">
             {isLoading ? "Searching…" : !error && `${results.length} found`}
           </span>
+          <NoteSortMenu sort={sort} onChange={updateSort} fields={SEARCH_SORT_FIELDS} />
           {onSaveSearch && query.trim() && (
             <Button
               variant="ghost"
