@@ -250,7 +250,7 @@ describe('reading', () => {
 
     const tags = await api('/api/tags');
     const importantTag = tags.data.find((t: any) => t.id === demoId('tag-important'));
-    assert.equal(importantTag.noteCount, 1);
+    assert.equal(importantTag.noteCount, 2, 'roadmap + hygiene demo water bill, not the passport to-do');
 
     // Recent (both recentRead and recentCreated) excludes to-dos
     await api(`/api/preferences/recent-reads/${demoId('note-todo-passport')}`, { method: 'POST' });
