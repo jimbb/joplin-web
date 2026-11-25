@@ -3,7 +3,7 @@ import { NoteListItem as NoteListItemType, Notebook, Tag } from "@/lib/types";
 import { NoteListItem } from "./NoteListItem";
 import { getResourceUrl } from "@/lib/api";
 import { formatRelativeTime, noteDisplayTitle } from "@/lib/format";
-import { NOTE_LIST_BOARD_GROUP_STORAGE_KEY, NOTE_LIST_VIEW_STORAGE_KEY } from "@/lib/ui-constants";
+import { NOTE_LIST_VIEW_STORAGE_KEY } from "@/lib/ui-constants";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -23,7 +23,6 @@ import {
   Plus,
   Search,
   Sparkles,
-  Square,
   Star,
   Table2,
   Tag as TagIcon,
@@ -100,7 +99,6 @@ interface NoteListProps {
 type SortField = "updated" | "created" | "title";
 type SortOrder = "asc" | "desc";
 type CollectionViewMode = "list" | "gallery" | "table" | "board";
-type BoardGrouping = "status" | "tags";
 
 function loadViewMode(): CollectionViewMode {
   try {
@@ -115,24 +113,6 @@ function loadViewMode(): CollectionViewMode {
 function saveViewMode(mode: CollectionViewMode) {
   try {
     localStorage.setItem(NOTE_LIST_VIEW_STORAGE_KEY, mode);
-  } catch {
-    // storage unavailable
-  }
-}
-
-function loadBoardGrouping(): BoardGrouping {
-  try {
-    const raw = localStorage.getItem(NOTE_LIST_BOARD_GROUP_STORAGE_KEY);
-    if (raw === "status" || raw === "tags") return raw;
-  } catch {
-    // storage unavailable
-  }
-  return "status";
-}
-
-function saveBoardGrouping(group: BoardGrouping) {
-  try {
-    localStorage.setItem(NOTE_LIST_BOARD_GROUP_STORAGE_KEY, group);
   } catch {
     // storage unavailable
   }
@@ -222,7 +202,6 @@ export function NoteList({
   const [filterText, setFilterText] = useState("");
   const [sort, setSort] = useState<SortChoice>(loadSort);
   const [viewMode, setViewMode] = useState<CollectionViewMode>(loadViewMode);
-  const [boardGrouping, setBoardGrouping] = useState<BoardGrouping>(loadBoardGrouping);
   const { field: sortField, order: sortOrder } = sort;
   const [renderLimit, setRenderLimit] = useState(NOTE_LIST_PAGE_SIZE);
   const [moveOpen, setMoveOpen] = useState(false);
@@ -265,11 +244,6 @@ export function NoteList({
   const updateViewMode = (next: CollectionViewMode) => {
     setViewMode(next);
     saveViewMode(next);
-  };
-
-  const updateBoardGrouping = (next: BoardGrouping) => {
-    setBoardGrouping(next);
-    saveBoardGrouping(next);
   };
 
   const filteredAndSortedNotes = useMemo(() => {
@@ -326,13 +300,6 @@ export function NoteList({
 
   const boardLanes = useMemo(() => {
     if (viewMode !== "board") return [];
-    if (boardGrouping === "status") {
-      return [
-        { key: "status:open", label: "Open To-dos", items: visibleNotes.filter((n) => n.isTodo && !n.todoCompleted) },
-        { key: "status:done", label: "Completed", items: visibleNotes.filter((n) => n.isTodo && n.todoCompleted) },
-        { key: "status:notes", label: "Notes", items: visibleNotes.filter((n) => !n.isTodo) },
-      ].filter((lane) => lane.items.length > 0);
-    }
 
     const titleById = new Map<string, string>();
     for (const t of availableTags) {
@@ -381,7 +348,7 @@ export function NoteList({
       lanes.push({ key: "tag:untagged", label: "Untagged", items: untagged });
     }
     return lanes;
-  }, [viewMode, boardGrouping, visibleNotes, availableTags]);
+  }, [viewMode, visibleNotes, availableTags]);
 
   const selectedNotes = useMemo(
     () => notes.filter((n) => selectedIds.has(n.id)),
@@ -916,37 +883,6 @@ export function NoteList({
 
             {viewMode === "board" && (
               <div className="space-y-4">
-                <div className="flex items-center justify-between gap-2 px-0.5">
-                  <span className="text-[11px] font-medium text-muted-foreground">Group by</span>
-                  <div
-                    role="group"
-                    aria-label="Board grouping"
-                    className="inline-flex items-center rounded-md border border-border/50 bg-muted/30 p-0.5"
-                  >
-                    {(
-                      [
-                        { id: "status", label: "Status" },
-                        { id: "tags", label: "Tags" },
-                      ] as const
-                    ).map(({ id, label }) => (
-                      <button
-                        key={id}
-                        type="button"
-                        onClick={() => updateBoardGrouping(id)}
-                        aria-pressed={boardGrouping === id}
-                        className={cn(
-                          "rounded-sm px-2 py-0.5 text-[11px] font-medium transition-colors",
-                          boardGrouping === id
-                            ? "bg-background text-foreground shadow-xs"
-                            : "text-muted-foreground hover:text-foreground"
-                        )}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
                 {boardLanes.map((lane) => (
                   <section key={lane.key} className="rounded-xl border border-border/70 bg-muted/20 p-2.5 space-y-2">
                     <div className="flex items-center justify-between px-1">
@@ -985,27 +921,9 @@ export function NoteList({
                                   : "border-border/50 hover:bg-muted/50"
                             )}
                           >
-                            {note.isTodo && (
-                              <button
-                                type="button"
-                                disabled={!onToggleTodo}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onToggleTodo?.(note.id, !note.todoCompleted);
-                                }}
-                                aria-label={`Toggle ${itemTitle}`}
-                                className="mt-0.5 shrink-0"
-                              >
-                                {note.todoCompleted ? (
-                                  <CheckSquare className="h-3.5 w-3.5 text-success" />
-                                ) : (
-                                  <Square className="h-3.5 w-3.5 text-warning" />
-                                )}
-                              </button>
-                            )}
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-1">
-                                <span className={cn("text-xs font-medium text-foreground truncate", note.todoCompleted && "line-through text-muted-foreground")}>
+                                <span className={cn("text-xs font-medium text-foreground truncate", note.isTodo && note.todoCompleted && "line-through text-muted-foreground")}>
                                   {itemTitle}
                                 </span>
                                 {favoriteNoteIds?.has(note.id) && (

@@ -89,6 +89,7 @@ function renderPage(route: string) {
         <Route path="/notebooks/:notebookId/notes/:id" element={<NotesPage />} />
         <Route path="/trash" element={<NotesPage />} />
         <Route path="/trash/:id" element={<NotesPage />} />
+        <Route path="/tasks/:id" element={<div>Tasks Pane</div>} />
       </Routes>
       <LocationProbe />
     </>,
@@ -219,6 +220,36 @@ describe("NotesPage", () => {
     await waitFor(() => expect(location()).toBe(`/notebooks/${work.id}/notes/${created.id}`));
     expect(calls.find((c) => c.method === "POST")?.body).toEqual({ parentId: work.id, title: "", body: "", isTodo: false });
     expect(await screen.findByText(`Editing ${created.id}`)).toBeTruthy();
+  });
+
+  it("creates a to-do and navigates to /tasks/:id", async () => {
+    const createdTodo: Note = { ...fullNote("f", "", work, ""), isTodo: true };
+    const calls = mockNotesApi((call) => {
+      if (call.method === "POST" && call.path === "/api/notes") return jsonResponse(createdTodo, 201);
+      return undefined;
+    });
+    renderPage(`/notebooks/${work.id}`);
+    await noteRow("Roadmap");
+
+    fireEvent.keyDown(screen.getByRole("button", { name: "Create new note" }), { key: "Enter" });
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "To-do" }));
+
+    await waitFor(() => expect(location()).toBe(`/tasks/${createdTodo.id}`));
+    expect(calls.find((c) => c.method === "POST")?.body).toEqual({ parentId: work.id, title: "", body: "", isTodo: true });
+  });
+
+  it("opens a to-do directly on /notes/:id without redirecting and shows an Open in Tasks link", async () => {
+    const todoNote: Note = { ...fullNote("9", "Renew passport", personal, "Bring photos."), isTodo: true };
+    mockNotesApi((call) => {
+      if (call.method === "GET" && call.path === `/api/notes/${todoNote.id}`) return jsonResponse(todoNote);
+      return undefined;
+    });
+    renderPage(`/notes/${todoNote.id}`);
+
+    expect(await viewerTitle("Renew passport")).toBeTruthy();
+    expect(location()).toBe(`/notes/${todoNote.id}`);
+    const openLink = screen.getByRole("link", { name: "Open in Tasks" });
+    expect(openLink.getAttribute("href")).toBe(`/tasks/${todoNote.id}`);
   });
 
   it("shows the empty trash without a create button", async () => {

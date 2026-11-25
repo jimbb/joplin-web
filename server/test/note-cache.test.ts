@@ -385,7 +385,7 @@ describe('derived counts', () => {
     }
   });
 
-  test('tag counts count distinct active notes', async () => {
+  test('tag counts count distinct active regular notes (excluding to-dos and conflicts)', async () => {
     const tags = await noteCache.getTags(session);
     const entry = await noteCache.getEntry(session);
     for (const tag of tags) {
@@ -393,12 +393,20 @@ describe('derived counts', () => {
         entry.noteTags
           .filter((l) => l.tagId === tag.id)
           .map((l) => entry.notes.get(l.noteId))
-          .filter((n) => n && !(n.deletedTime > 0) && !((entry.notebooks.get(n.parentId)?.deletedTime ?? 0) > 0))
+          .filter(
+            (n) =>
+              n &&
+              !n.isTodo &&
+              n.properties.is_conflict !== '1' &&
+              !(n.deletedTime > 0) &&
+              !((entry.notebooks.get(n.parentId)?.deletedTime ?? 0) > 0)
+          )
           .map((n) => n!.id)
       ).size;
       assert.equal(tag.noteCount, expected, tag.title);
     }
     assert.equal(tags.find((t) => t.title === 'cooking')?.noteCount, 2);
+    assert.equal(tags.find((t) => t.title === 'important')?.noteCount, 1);
   });
 });
 

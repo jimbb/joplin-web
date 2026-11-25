@@ -207,6 +207,87 @@ describe('reading', () => {
     assert.equal(cooking.noteCount, 2);
   });
 
+  test('excludes to-do notes from notes lists, counts, and recent while keeping them in tasks, search, direct fetch, and trash', async () => {
+    const todoIds = [demoId('note-todo-passport'), demoId('note-todo-bill'), demoId('note-todo-train')];
+
+    // All notes excludes to-dos, but keeps regular notes containing inline checklists
+    const all = await api('/api/notes');
+    assert.equal(all.status, 200);
+    for (const id of todoIds) {
+      assert.ok(!all.data.some((n: any) => n.id === id), `All notes excludes to-do ${id}`);
+    }
+    assert.ok(all.data.some((n: any) => n.id === demoId('note-roadmap')), 'regular note with checklist stays');
+    assert.ok(all.data.some((n: any) => n.id === demoId('note-lisbon')), 'regular note with checklist stays');
+
+    // Notebook lists exclude to-dos
+    const personalNotes = await api(`/api/notes?notebook_id=${demoId('nb-personal')}`);
+    assert.equal(personalNotes.status, 200);
+    assert.deepEqual(personalNotes.data, [], 'Personal only has to-dos directly');
+
+    const travelNotes = await api(`/api/notes?notebook_id=${demoId('nb-travel')}`);
+    assert.equal(travelNotes.status, 200);
+    assert.deepEqual(
+      travelNotes.data.map((n: any) => n.id),
+      [demoId('note-lisbon')],
+      'Travel lists only the regular note'
+    );
+
+    // Tag list excludes to-dos
+    const importantNotes = await api(`/api/notes?tag_id=${demoId('tag-important')}`);
+    assert.equal(importantNotes.status, 200);
+    assert.deepEqual(
+      importantNotes.data.map((n: any) => n.id),
+      [demoId('note-roadmap')],
+      'important tag list excludes Renew passport to-do'
+    );
+
+    // Sidebar notebook and tag counts exclude to-dos
+    const notebooks = await api('/api/notebooks');
+    const personal = notebooks.data.find((nb: any) => nb.id === demoId('nb-personal'));
+    const travel = personal.children.find((nb: any) => nb.id === demoId('nb-travel'));
+    assert.equal(personal.noteCount, 0);
+    assert.equal(travel.noteCount, 1);
+
+    const tags = await api('/api/tags');
+    const importantTag = tags.data.find((t: any) => t.id === demoId('tag-important'));
+    assert.equal(importantTag.noteCount, 1);
+
+    // Recent (both recentRead and recentCreated) excludes to-dos
+    await api(`/api/preferences/recent-reads/${demoId('note-todo-passport')}`, { method: 'POST' });
+    const recent = await api('/api/notes/recent');
+    assert.equal(recent.status, 200);
+    for (const id of todoIds) {
+      assert.ok(!recent.data.recentRead.some((n: any) => n.id === id), 'recentRead excludes to-dos');
+      assert.ok(!recent.data.recentCreated.some((n: any) => n.id === id), 'recentCreated excludes to-dos');
+    }
+
+    // Search still finds to-dos and direct GET /api/notes/:id still opens them
+    const search = await api('/api/search?q=passport');
+    assert.equal(search.status, 200);
+    assert.ok(search.data.some((n: any) => n.id === demoId('note-todo-passport')));
+
+    const direct = await api(`/api/notes/${demoId('note-todo-passport')}`);
+    assert.equal(direct.status, 200);
+    assert.equal(direct.data.isTodo, true);
+    assert.equal(direct.data.title, 'Renew passport');
+
+    // Trash still shows trashed to-dos
+    const createdTodo = await api('/api/notes', {
+      method: 'POST',
+      body: JSON.stringify({ title: 'Temporary trashed todo', parentId: demoId('nb-personal'), isTodo: true }),
+    });
+    assert.equal(createdTodo.status, 201);
+    const trashId = createdTodo.data.id as string;
+    try {
+      assert.equal((await api(`/api/notes/${trashId}`, { method: 'DELETE' })).status, 204);
+      const trash = await api('/api/notes?is_trash=true');
+      assert.equal(trash.status, 200);
+      assert.ok(trash.data.some((n: any) => n.id === trashId && n.isTodo === true));
+    } finally {
+      await api(`/api/notes/${trashId}?permanent=true`, { method: 'DELETE' });
+    }
+  });
+
   test('serves resource binaries with their MIME type', async () => {
     const res = await api(`/api/resources/${demoId('res-tram')}`);
     assert.equal(res.status, 200);
@@ -300,7 +381,10 @@ describe('writing', () => {
     assert.equal(set.data.title, 'Water plants', 'other fields are kept');
     assert.equal(storedDue(id), String(due), 'stored as Unix ms like Joplin desktop');
     assert.ok(set.data.updatedTime > created.data.updatedTime);
-    const listed = (await api(`/api/notes?notebook_id=${demoId('nb-personal')}`)).data.find((n: any) => n.id === id);
+    const nbNotes = await api(`/api/notes?notebook_id=${demoId('nb-personal')}`);
+    assert.ok(!nbNotes.data.some((n: any) => n.id === id), 'to-do is not listed in notebook notes');
+    const tasks = await api('/api/tasks');
+    const listed = tasks.data.todoNotes.find((n: any) => n.id === id);
     assert.equal(listed.todoDue, due, 'cache updated');
 
     const stale = await put(id, { todoDue: due + 1, baseUpdatedTime: created.data.updatedTime });

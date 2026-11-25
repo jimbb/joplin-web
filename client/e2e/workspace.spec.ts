@@ -80,13 +80,9 @@ test.describe("workspace features", () => {
     await expect(page.getByRole("table")).toBeVisible();
 
     await page.getByRole("button", { name: "Board view" }).click();
-    await expect(page.getByRole("heading", { level: 4, name: "Completed" })).toBeVisible();
-
-    // Board grouping by Tags
-    await page.getByRole("button", { name: "Tags", exact: true }).click();
     await expect(page.getByRole("heading", { level: 4, name: "#planning" })).toBeVisible();
-    await page.getByRole("button", { name: "Status", exact: true }).click();
-    await expect(page.getByRole("heading", { level: 4, name: "Completed" })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 4, name: "Open To-dos" })).toHaveCount(0);
+    await expect(page.getByRole("heading", { level: 4, name: "Completed" })).toHaveCount(0);
 
     // Switch back to List view cleanly
     await page.getByRole("button", { name: "List view" }).click();
