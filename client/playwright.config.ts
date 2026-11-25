@@ -40,6 +40,9 @@ export default defineConfig({
         PORT: String(API_PORT),
         MOCK_JOPLIN_PORT: String(MOCK_JOPLIN_PORT),
         CLIPPER_EXTENSION_IDS: "nlplgmnmaigjhfbhkbmcpfcdnppaklco",
+        // Every test talks to this one server from one address: the default 1000 requests per
+        // 15 minutes runs out before the last tests of a full run
+        RATE_LIMIT_MAX: "100000",
       },
       url: `http://localhost:${API_PORT}/api/health`,
       reuseExistingServer: !process.env.CI,
