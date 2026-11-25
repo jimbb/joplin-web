@@ -25,6 +25,7 @@ npm --prefix client run lint
 npm --prefix client run build       # tsc -b + vite build
 npm --prefix client test            # Vitest + Testing Library (jsdom), offline
 npm --prefix client run test:e2e    # Playwright smoke tests; starts the demo itself (Chrome, or E2E_EXECUTABLE_PATH)
+                                    # on dev hosts: E2E_CHANNEL=chromium (Playwright's Chromium); E2E_EXECUTABLE_PATH must not be branded Chrome, which ignores the clipper spec's --load-extension
 npm --prefix client run dev         # Vite :5173, proxies /api to API_PROXY_TARGET (default :3001)
 npm --prefix client run screenshots # README screenshots into docs/images (demo must run; SCREENSHOT_BASE_URL)
 (cd server && NODE_OPTIONS='--max-old-space-size=1024 --expose-gc' npx tsx test/search-bench.ts)  # search timings + result digests on a synthetic 12k-note account (run on a dev host)
