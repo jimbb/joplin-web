@@ -7,9 +7,10 @@ import { defineConfig, devices } from "@playwright/test";
  *   E2E_CHANNEL          browser channel (default "chrome": a locally installed Chrome, no download)
  *   E2E_EXECUTABLE_PATH  a Chromium binary to use instead of a channel
  */
-const API_PORT = 3201;
-const MOCK_JOPLIN_PORT = 22301;
-const CLIENT_PORT = 5201;
+// Overridable so parallel runs on one host (several worktrees) don't share ports
+const API_PORT = Number(process.env.E2E_API_PORT || 3201);
+const MOCK_JOPLIN_PORT = Number(process.env.E2E_MOCK_JOPLIN_PORT || 22301);
+const CLIENT_PORT = Number(process.env.E2E_CLIENT_PORT || 5201);
 const executablePath = process.env.E2E_EXECUTABLE_PATH;
 
 export default defineConfig({
