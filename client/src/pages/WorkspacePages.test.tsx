@@ -20,7 +20,9 @@ vi.mock("sonner", () => ({
   toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn() },
 }));
 vi.mock("@/components/notes/NoteEditor", () => ({
-  NoteEditor: ({ note }: { note: Note }) => <div>Editing {note.id}</div>,
+  NoteEditor: ({ note, focusTitle }: { note: Note; focusTitle?: boolean }) => (
+    <div data-focus-title={focusTitle ? "true" : "false"}>Editing {note.id}</div>
+  ),
 }));
 
 const id = (c: string) => c.repeat(32);
@@ -609,6 +611,234 @@ describe("TasksPage", () => {
       expect(within(barAfterDelete).queryByRole("button", { name: /^FB Saved/ })).toBeNull()
     );
     expect(screen.getByText("Verify DNS")).toBeTruthy();
+  });
+
+  it("opens /tasks/:id in the right pane, preserves filters/category/group, syncs completion, and highlights inline tasks", async () => {
+    let todoDone = false;
+    const todoNote: Note = {
+      ...sampleNoteA,
+      id: noteAId,
+      title: "Renew cert",
+      body: "Renew TLS certificate before expiry.",
+      parentId: workNb.id,
+      notebookId: workNb.id,
+      notebookTitle: "Work",
+      isTodo: true,
+      todoCompleted: false,
+    };
+    const checklistNote: Note = {
+      ...sampleNoteA,
+      id: noteCId,
+      title: "Launch Plan",
+      body: "# Checklist\n\n- [ ] Verify DNS\n- [ ] Smoke test\n",
+      parentId: workNb.id,
+      notebookId: workNb.id,
+      notebookTitle: "Work",
+      isTodo: false,
+      todoCompleted: false,
+    };
+
+    mockBaseWorkspace((call) => {
+      if (call.path === "/api/tasks") {
+        return jsonResponse({
+          todoNotes: [
+            {
+              id: noteAId,
+              parentId: workNb.id,
+              title: "Renew cert",
+              notebookTitle: "Work",
+              notebookPath: "Work",
+              todoCompleted: todoDone,
+              todoDue: 0,
+              updatedTime: 2000,
+            },
+          ],
+          inlineTasks: [
+            {
+              noteId: noteCId,
+              parentId: workNb.id,
+              noteTitle: "Launch Plan",
+              notebookTitle: "Work",
+              notebookPath: "Work",
+              text: "Verify DNS",
+              line: 3,
+              column: 1,
+              checked: false,
+              updatedTime: 1800,
+            },
+          ],
+        });
+      }
+      if (call.method === "GET" && call.path === `/api/notes/${noteAId}`) {
+        return jsonResponse({ ...todoNote, todoCompleted: todoDone });
+      }
+      if (call.method === "GET" && call.path === `/api/notes/${noteCId}`) {
+        return jsonResponse(checklistNote);
+      }
+      if (call.method === "PUT" && call.path === `/api/notes/${noteAId}`) {
+        todoDone = Boolean((call.body as { todoCompleted?: boolean }).todoCompleted);
+        return jsonResponse({ ...todoNote, todoCompleted: todoDone, updatedTime: Date.now() });
+      }
+      return undefined;
+    });
+
+    renderWithProviders(
+      <>
+        <Routes>
+          <Route path="/tasks" element={<TasksPage />} />
+          <Route path="/tasks/:id" element={<TasksPage />} />
+        </Routes>
+        <LocationProbe />
+      </>,
+      { route: "/tasks" }
+    );
+
+    expect(await screen.findByText("Renew cert")).toBeTruthy();
+    expect(screen.getByText("No task selected")).toBeTruthy();
+
+    // Set category filter, local filter, and Group mode before opening a task
+    const categoryBar = screen.getByRole("group", { name: "Task categories" });
+    fireEvent.click(within(categoryBar).getByRole("button", { name: /^Work \(2\)$/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Group" }));
+    expect(screen.getByRole("button", { name: "Group" }).getAttribute("aria-pressed")).toBe("true");
+
+    // Click task -> opens /tasks/:id in the right pane and highlights the selected row
+    fireEvent.click(screen.getByRole("link", { name: "Renew cert" }));
+    await waitFor(() => expect(screen.getByTestId("location").textContent).toBe(`/tasks/${noteAId}?category=${workNb.id}`));
+    expect(await screen.findByRole("heading", { level: 1, name: "Renew cert" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Renew cert" }).closest("[data-selected]")).toBeTruthy();
+    // Should NOT show "Open in Tasks" when already inside Tasks Hub
+    expect(screen.queryByRole("link", { name: "Open in Tasks" })).toBeNull();
+
+    // Toggle completion inside the NoteViewer pane -> updates the task list counts
+    fireEvent.click(screen.getByRole("button", { name: "To do: mark as done" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Completed (1)" })).toBeTruthy());
+    expect(screen.getByRole("button", { name: "Open (1)" })).toBeTruthy();
+
+    // Open inline checklist item -> opens containing note with ?line=3 and highlights the task line
+    fireEvent.click(screen.getByRole("link", { name: "Verify DNS" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("location").textContent).toBe(`/tasks/${noteCId}?category=${workNb.id}&line=3`)
+    );
+    expect(await screen.findByRole("heading", { level: 1, name: "Launch Plan" })).toBeTruthy();
+    await waitFor(() => expect(document.querySelector('[data-highlighted-task="true"]')).toBeTruthy());
+
+    // Close pane -> returns to /tasks keeping category and Group state intact
+    fireEvent.click(screen.getByRole("button", { name: "Close note view" }));
+    await waitFor(() => expect(screen.getByTestId("location").textContent).toBe(`/tasks?category=${workNb.id}`));
+    expect(screen.getByRole("button", { name: "Group" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("uses single-pane phone layout (list -> note -> close back to list)", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      }))
+    );
+
+    const todoNote: Note = {
+      ...sampleNoteA,
+      id: noteAId,
+      title: "Phone task",
+      body: "Mobile detail text",
+      isTodo: true,
+      todoCompleted: false,
+    };
+
+    mockBaseWorkspace((call) => {
+      if (call.path === "/api/tasks") {
+        return jsonResponse({
+          todoNotes: [
+            { id: noteAId, parentId: inboxNb.id, title: "Phone task", notebookTitle: "Inbox", todoCompleted: false, todoDue: 0, updatedTime: 1000 },
+          ],
+          inlineTasks: [],
+        });
+      }
+      if (call.method === "GET" && call.path === `/api/notes/${noteAId}`) return jsonResponse(todoNote);
+      return undefined;
+    });
+
+    renderWithProviders(
+      <>
+        <Routes>
+          <Route path="/tasks" element={<TasksPage />} />
+          <Route path="/tasks/:id" element={<TasksPage />} />
+        </Routes>
+        <LocationProbe />
+      </>,
+      { route: "/tasks" }
+    );
+
+    const listScroller = await screen.findByTestId("tasks-scroll-container");
+    const listPane = listScroller.parentElement!;
+    expect(listPane.className).not.toContain("hidden md:flex");
+
+    fireEvent.click(await screen.findByRole("link", { name: "Phone task" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "Phone task" })).toBeTruthy();
+    expect(listPane.className).toContain("hidden md:flex");
+
+    fireEvent.click(screen.getByRole("button", { name: "Close note view" }));
+    await waitFor(() => expect(screen.getByTestId("location").textContent).toBe("/tasks"));
+    expect(listPane.className).not.toContain("hidden md:flex");
+  });
+
+  it("creates a new task in the filtered category's notebook (or default) and opens it with title focused", async () => {
+    const newId = id("9");
+    let createdNote: Note | null = null;
+    const calls = mockBaseWorkspace((call) => {
+      if (call.path === "/api/tasks") {
+        return jsonResponse({
+          todoNotes: [
+            { id: noteAId, parentId: workNb.id, title: "Existing work task", notebookTitle: "Work", notebookPath: "Work", todoCompleted: false, todoDue: 0, updatedTime: 1000 },
+          ],
+          inlineTasks: [],
+        });
+      }
+      if (call.method === "POST" && call.path === "/api/notes") {
+        const body = call.body as { parentId: string; title: string; body: string; isTodo?: boolean };
+        createdNote = {
+          ...sampleNoteA,
+          id: newId,
+          title: body.title,
+          body: body.body,
+          parentId: body.parentId,
+          notebookId: body.parentId,
+          notebookTitle: body.parentId === workNb.id ? "Work" : "Inbox",
+          isTodo: Boolean(body.isTodo),
+          todoCompleted: false,
+        };
+        return jsonResponse(createdNote, 201);
+      }
+      if (call.method === "GET" && call.path === `/api/notes/${newId}` && createdNote) {
+        return jsonResponse(createdNote);
+      }
+      return undefined;
+    });
+
+    renderWithProviders(
+      <>
+        <Routes>
+          <Route path="/tasks" element={<TasksPage />} />
+          <Route path="/tasks/:id" element={<TasksPage />} />
+        </Routes>
+        <LocationProbe />
+      </>,
+      { route: `/tasks?category=${workNb.id}` }
+    );
+
+    expect(await screen.findByText("Existing work task")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "New task" }));
+
+    await waitFor(() => expect(screen.getByTestId("location").textContent).toBe(`/tasks/${newId}?category=${workNb.id}`));
+    const post = calls.find((c) => c.method === "POST" && c.path === "/api/notes")!;
+    expect(post.body).toEqual({ parentId: workNb.id, title: "", body: "", isTodo: true });
+    const editor = await screen.findByText(`Editing ${newId}`);
+    expect(editor.getAttribute("data-focus-title")).toBe("true");
   });
 });
 

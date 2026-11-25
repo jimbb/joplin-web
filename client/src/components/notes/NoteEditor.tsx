@@ -74,6 +74,8 @@ interface NoteEditorProps {
   focusTitle?: boolean;
   /** Start from a draft restored from this device instead of the server text */
   initialDraft?: StoredDraft | null;
+  /** Called after the note is saved to the server */
+  onSaved?: (saved: Note) => void;
   onDone: () => void;
 }
 
@@ -87,7 +89,11 @@ const escapeVoiceHtml = (text: string) =>
  * Initialised once from `note`; later updates to the prop are ignored so typing is never reset.
  * Unsaved text is mirrored to localStorage (see lib/drafts) until the server has it.
  */
-export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDone }: NoteEditorProps) {
+export function NoteEditor({ note, focusTitle = false, initialDraft = null, onSaved, onDone }: NoteEditorProps) {
+  const onSavedRef = useRef(onSaved);
+  useEffect(() => {
+    onSavedRef.current = onSaved;
+  }, [onSaved]);
   const queryClient = useQueryClient();
   // Split view needs the width of the lg breakpoint; below it (phones, three panes on tablets) it acts as Edit
   const noRoomForSplit = useIsMobile(1024);
@@ -178,6 +184,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
             setStatus(upToDate ? "saved" : "dirty");
             // An earlier failure is resolved now
             toast.dismiss(`save-error-${note.id}`);
+            onSavedRef.current?.(saved);
           },
           onError: (err) => {
             if (err instanceof ApiError && err.status === 409) {
@@ -339,9 +346,10 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
         void saver.send(
           { title: pending.title, body: pending.body },
           {
-            onSaved: () => {
+            onSaved: (saved) => {
               savedRef.current = pending;
               clearDraft(note.id);
+              onSavedRef.current?.(saved);
             },
             onError: (err) => {
               if (!isSessionExpired(err)) reportLost(err);

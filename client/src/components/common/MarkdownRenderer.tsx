@@ -34,6 +34,11 @@ interface MarkdownRendererProps {
    * (see `setTaskChecked` in lib/tasks).
    */
   onToggleTask?: (location: TaskLocation, checked: boolean) => void;
+  /**
+   * 1-based source line of an inline GFM task to scroll into view and highlight (used when
+   * opening a checklist item from the Tasks Hub).
+   */
+  highlightTaskLine?: number | null;
 }
 
 interface SourcePosition {
@@ -545,7 +550,13 @@ const STATIC_MARKDOWN_COMPONENTS: React.ComponentProps<typeof ReactMarkdown>["co
  * Reusable Markdown renderer for Joplin notes with code highlighting,
  * resource resolving, and beautiful typography.
  */
-export function MarkdownRenderer({ content, className, html = false, onToggleTask }: MarkdownRendererProps) {
+export function MarkdownRenderer({
+  content,
+  className,
+  html = false,
+  onToggleTask,
+  highlightTaskLine = null,
+}: MarkdownRendererProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
@@ -672,6 +683,7 @@ export function MarkdownRenderer({ content, className, html = false, onToggleTas
               checked={Boolean(checked)}
               readOnly={!interactive}
               disabled={!interactive}
+              data-task-line={Number.isInteger(location.line) ? location.line : undefined}
               onChange={interactive ? (e) => onToggleTask?.(location, e.target.checked) : undefined}
               className={`mr-2 h-4 w-4 rounded border-border text-primary accent-primary align-middle ${
                 interactive ? "cursor-pointer" : "cursor-default"
@@ -702,6 +714,25 @@ export function MarkdownRenderer({ content, className, html = false, onToggleTas
     scrolledForRef.current = location.key;
     target.scrollIntoView({ block: "start" });
   }, [location.hash, location.key, processedContent]);
+
+  // When an inline task is opened from the Tasks Hub, scroll to and subtly highlight its item
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !highlightTaskLine || !Number.isInteger(highlightTaskLine) || highlightTaskLine < 1) return;
+    const checkbox = container.querySelector<HTMLInputElement>(
+      `input[type="checkbox"][data-task-line="${highlightTaskLine}"]`
+    );
+    if (!checkbox) return;
+    const target = checkbox.closest("li") ?? checkbox;
+    const highlightClasses = ["bg-primary/15", "rounded-md", "px-1.5", "-mx-1.5", "ring-1", "ring-primary/30"];
+    target.classList.add(...highlightClasses);
+    target.setAttribute("data-highlighted-task", "true");
+    target.scrollIntoView?.({ block: "center" });
+    return () => {
+      target.classList.remove(...highlightClasses);
+      target.removeAttribute("data-highlighted-task");
+    };
+  }, [highlightTaskLine, processedContent]);
 
   return (
     <div ref={containerRef} className={`prose-content text-foreground leading-relaxed ${className ?? ""}`}>
