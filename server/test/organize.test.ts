@@ -221,6 +221,11 @@ describe('Auto-organize unit checks: prompts, similarity & validation', () => {
     assert.ok(!stripped.includes(`:/${'a'.repeat(32)}`));
     assert.ok(stripped.includes('Invoice Portal'));
 
+    const redosStart = performance.now();
+    stripLinksFromBody(`${'<a >'.repeat(20_000)}${'<img alt="x" '.repeat(15_000)}${' '.repeat(30_000)}x`, 2, 2000);
+    stripLinksFromBody(`${'['.repeat(30_000)}${' '.repeat(30_000)}x`, 1, 2000);
+    assert.ok(performance.now() - redosStart < 300, 'stripLinksFromBody should run in linear time');
+
     const longTitle = `2024-02-01 ${'HSBC UK Bank Statement '.repeat(5)}End`;
     const userPrompt = buildOrganizeUserPrompt({
       currentTitle: '2024_03_11.pdf',

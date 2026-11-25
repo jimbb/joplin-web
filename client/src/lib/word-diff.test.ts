@@ -48,4 +48,14 @@ describe("buildComparableText", () => {
     ]);
     expect(text).toBe("Filed copy.\n\nPaid in full");
   });
+
+  it("handles pathological unclosed resource links in linear time", () => {
+    const resId = "c".repeat(32);
+    const startedAt = performance.now();
+    const text = buildComparableText(`${`<a href=":/${resId}">`.repeat(15_000)}${"![".repeat(20_000)}`, [
+      { id: resId, ocrText: "ok" },
+    ]);
+    expect(text).toContain("ok");
+    expect(performance.now() - startedAt).toBeLessThan(300);
+  });
 });

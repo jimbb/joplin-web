@@ -87,12 +87,15 @@ describe('matchesNamePattern', () => {
     assert.equal(matchesNamePattern('ab', 'abc*'), false);
   });
 
-  test('handles repeated wildcards on mismatched long titles without backtracking (no ReDoS)', () => {
-    const startedAt = Date.now();
-    const result = matchesNamePattern(`${'a'.repeat(500)}c`, `${'a*'.repeat(60)}b`);
-    const elapsedMs = Date.now() - startedAt;
-    assert.equal(result, false);
-    assert.ok(elapsedMs < 200, `Expected linear/polynomial wildcard match, took ${elapsedMs}ms`);
+  test('handles repeated wildcards and long segments on mismatched titles in linear time (no ReDoS)', () => {
+    const startedAt = performance.now();
+    assert.equal(matchesNamePattern(`${'a'.repeat(500)}c`, `${'a*'.repeat(60)}b`), false);
+    assert.equal(matchesNamePattern(`${'a'.repeat(40_000)}c`, `*${'a'.repeat(20_000)}b`), false);
+    assert.equal(matchesNamePattern(`${'a'.repeat(40_000)}c`, `*${'a'.repeat(20_000)}b*`), false);
+    const parsed = parseSearchQuery('a '.repeat(20_000));
+    assert.equal(parsed.terms.length, 20_000);
+    const elapsedMs = performance.now() - startedAt;
+    assert.ok(elapsedMs < 300, `Expected linear wildcard/query matching, took ${elapsedMs.toFixed(1)}ms`);
   });
 });
 

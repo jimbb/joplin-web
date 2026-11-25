@@ -29,7 +29,7 @@ Origin check (`server/src/middleware/origin-check.ts`), helmet and rate limiting
 - **CSRF (CWE-352):** every state-changing route passes `createOriginCheck`.
 - **Path/ID injection (CWE-20):** ids match `^[0-9a-f]{32}$` before any Joplin path is built.
 - **XSS (CWE-79):** rendered Markdown (KaTeX, Mermaid) is sanitised; note HTML never runs script.
-- **ReDoS (CWE-1333):** user- or note-controlled text and search patterns never go through backtracking regexes without length limits (gaps: note preview regex, wildcard search).
+- **ReDoS (CWE-1333):** user- or note-controlled text and search patterns never go through backtracking regexes without length limits.
 - **Data integrity:** updates keep unknown properties and conflict detection (`baseUpdatedTime` → 409).
 - **Secrets:** session tokens stay server-side; cookies are HttpOnly.
 

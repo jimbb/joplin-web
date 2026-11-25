@@ -230,7 +230,11 @@ export function serialize(item: {
   const sections: string[] = [];
   if (typeof item.title === 'string') {
     // Only a line feed would break the format; a stray "\r" is written back as-is, like Joplin does
-    sections.push(item.title.replace(/\r*\n[\r\n]*/g, ' '));
+    sections.push(
+      item.title.includes('\n')
+        ? item.title.replace(/\r+(?:\n[\r\n]*)?|\n[\r\n]*/g, (m) => (m.includes('\n') ? ' ' : m))
+        : item.title
+    );
   }
   if (item.body && item.type_ === JoplinItemType.Note) {
     sections.push(item.body);
@@ -252,6 +256,46 @@ function collapseWhitespace(text: string): string {
 }
 
 /**
+ * Replaces Markdown images (`![alt](url)`) or links (`[label](url)`) in a single linear scan,
+ * avoiding quadratic regex backtracking on inputs with many unmatched `[` or `(`.
+ */
+export function replaceMarkdownLinks(
+  text: string,
+  options: { images: boolean; keepLabel: boolean; allowEmptyLabel?: boolean }
+): string {
+  const needle = options.images ? '![' : '[';
+  const allowEmpty = options.allowEmptyLabel ?? options.images;
+  let out = '';
+  let lastCopied = 0;
+  let nextCloseBracket = -1;
+  let pos = 0;
+
+  while (pos < text.length) {
+    const open = text.indexOf(needle, pos);
+    if (open === -1) break;
+    const labelStart = open + needle.length;
+    if (nextCloseBracket < labelStart) {
+      nextCloseBracket = text.indexOf(']', labelStart);
+      if (nextCloseBracket === -1) break;
+    }
+    if ((allowEmpty || nextCloseBracket > labelStart) && text[nextCloseBracket + 1] === '(') {
+      const closeParen = text.indexOf(')', nextCloseBracket + 2);
+      if (closeParen === -1) break;
+      out += text.slice(lastCopied, open);
+      if (options.keepLabel) {
+        out += text.slice(labelStart, nextCloseBracket);
+      }
+      lastCopied = closeParen + 1;
+      pos = lastCopied;
+    } else {
+      pos = labelStart;
+    }
+  }
+
+  return lastCopied === 0 ? text : out + text.slice(lastCopied);
+}
+
+/**
  * Strips markdown markup to create a clean plaintext preview snippet.
  * Truncates to maxChars (default 150) and appends ellipsis if truncated.
  *
@@ -270,8 +314,8 @@ export function stripMarkdown(markdown?: string, maxChars = 150): string {
   }
   // Remove images and replace links with label text
   if (text.includes('[')) {
-    if (text.includes('![')) text = text.replace(/!\[([^\]]*)\]\([^)]*\)/g, '');
-    text = text.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1');
+    if (text.includes('![')) text = replaceMarkdownLinks(text, { images: true, keepLabel: false });
+    text = replaceMarkdownLinks(text, { images: false, keepLabel: true });
   }
   // Remove headings: # Heading
   if (text.includes('#')) text = text.replace(/^#{1,6}\s+/gm, '');
@@ -281,7 +325,7 @@ export function stripMarkdown(markdown?: string, maxChars = 150): string {
   const hasStarOrUnderscore = text.includes('*') || text.includes('_');
   const hasDash = text.includes('-');
   if (hasDash || hasStarOrUnderscore) {
-    text = text.replace(/^[-*_]{3,}\s*$/gm, '');
+    text = text.replace(/^[-*_]{3,}[ \t]*$/gm, '');
   }
   if (hasDash || text.includes('*') || text.includes('+')) {
     text = text.replace(/^[\*\-+]\s+/gm, '');
@@ -299,11 +343,11 @@ export function stripMarkdown(markdown?: string, maxChars = 150): string {
   // Remove table separator rows (| --- | :---: |) and the remaining cell pipes
   if (text.includes('|')) {
     text = text
-      .replace(/^\s*\|?(\s*:?-{3,}:?\s*\|)+\s*:?-*:?\s*$/gm, '')
-      .replace(/\s*\|\s*/g, ' ');
+      .replace(/^[ \t]*(?:\|[ \t]*)?(?::?-{3,}:?[ \t]*\|[ \t]*)+(?::?-+:?[ \t]*)?$/gm, '')
+      .replace(/\|/g, ' ');
   }
   // Remove HTML tags
-  if (text.includes('<')) text = text.replace(/<[^>]+>/g, '');
+  if (text.includes('<')) text = text.replace(/<[^<>]+>/g, '');
 
   return truncatePreview(collapseWhitespace(text), maxChars);
 }

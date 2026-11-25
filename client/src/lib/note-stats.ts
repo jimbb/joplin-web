@@ -6,15 +6,65 @@ export interface HeadingOutlineItem {
   slug: string;
 }
 
+function replaceMarkdownLinks(
+  text: string,
+  options: { images: boolean; replacementSuffix?: string; allowEmptyLabel?: boolean }
+): string {
+  const needle = options.images ? "![" : "[";
+  const allowEmpty = options.allowEmptyLabel ?? options.images;
+  const suffix = options.replacementSuffix ?? "";
+  let out = "";
+  let lastCopied = 0;
+  let nextCloseBracket = -1;
+  let pos = 0;
+
+  while (pos < text.length) {
+    const open = text.indexOf(needle, pos);
+    if (open === -1) break;
+    const labelStart = open + needle.length;
+    if (nextCloseBracket < labelStart) {
+      nextCloseBracket = text.indexOf("]", labelStart);
+      if (nextCloseBracket === -1) break;
+    }
+    if ((allowEmpty || nextCloseBracket > labelStart) && text[nextCloseBracket + 1] === "(") {
+      const closeParen = text.indexOf(")", nextCloseBracket + 2);
+      if (closeParen === -1) break;
+      out += text.slice(lastCopied, open);
+      out += text.slice(labelStart, nextCloseBracket);
+      out += suffix;
+      lastCopied = closeParen + 1;
+      pos = lastCopied;
+    } else {
+      pos = labelStart;
+    }
+  }
+
+  return lastCopied === 0 ? text : out + text.slice(lastCopied);
+}
+
+function stripTrailingAtxHashes(text: string): string {
+  let end = text.length;
+  while (end > 0 && /\s/.test(text[end - 1])) end--;
+  let hashStart = end;
+  while (hashStart > 0 && text[hashStart - 1] === "#") hashStart--;
+  if (hashStart < end && hashStart > 0 && /\s/.test(text[hashStart - 1])) {
+    while (hashStart > 0 && /\s/.test(text[hashStart - 1])) hashStart--;
+    return text.slice(0, hashStart);
+  }
+  return text.slice(0, end);
+}
+
 function cleanHeadingInlineMarkdown(raw: string): string {
-  return raw
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+  let text = raw;
+  if (text.includes("[")) {
+    if (text.includes("![")) text = replaceMarkdownLinks(text, { images: true, allowEmptyLabel: true });
+    text = replaceMarkdownLinks(text, { images: false, allowEmptyLabel: false });
+  }
+  text = text
     .replace(/`([^`]+)`/g, "$1")
     .replace(/(\*\*|__|\*|_|~~|==|\+\+|\^|~)/g, "")
-    .replace(/\\([\\`*_{}[\]()#+\-.!~^])/g, "$1")
-    .replace(/\s+#+\s*$/, "")
-    .trim();
+    .replace(/\\([\\`*_{}[\]()#+\-.!~^])/g, "$1");
+  return stripTrailingAtxHashes(text).trim();
 }
 
 /**
@@ -57,13 +107,19 @@ export function computeNoteStats(text: string, isHtml = false): {
   characters: number;
   readingMinutes: number;
 } {
-  const plain = isHtml
-    ? text.replace(/<[^>]+>/g, " ").replace(/&[a-z0-9#]+;/gi, " ")
-    : text
-        .replace(/```[\s\S]*?```/g, " ")
-        .replace(/`[^`]*`/g, " ")
-        .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1 ")
-        .replace(/[#>*_~=`[\]()-]/g, " ");
+  let plain: string;
+  if (isHtml) {
+    plain = text.replace(/<[^<>]+>/g, " ").replace(/&[a-z0-9#]+;/gi, " ");
+  } else {
+    plain = text.replace(/```[\s\S]*?```/g, " ").replace(/`[^`]*`/g, " ");
+    if (plain.includes("[")) {
+      if (plain.includes("![")) {
+        plain = replaceMarkdownLinks(plain, { images: true, replacementSuffix: " ", allowEmptyLabel: true });
+      }
+      plain = replaceMarkdownLinks(plain, { images: false, replacementSuffix: " ", allowEmptyLabel: true });
+    }
+    plain = plain.replace(/[#>*_~=`[\]()-]/g, " ");
+  }
   const normalized = plain.trim();
   const words = normalized ? normalized.split(/\s+/).length : 0;
   const characters = normalized.replace(/\s+/g, "").length;
@@ -73,13 +129,13 @@ export function computeNoteStats(text: string, isHtml = false): {
 
 /** Converts Joplin :/id image & item links to web URLs before TipTap WYSIWYG editing. */
 export function joplinToRichMarkdown(markdown: string): string {
-  if (!markdown) return "";
+  if (!markdown || !markdown.includes(":")) return markdown || "";
   let out = markdown.replace(
-    /!\[([^\]]*)\]\(:\/?([0-9a-fA-F]{32})(\s+"[^"]*")?\)/g,
+    /!\[([^[\]]*)\]\(:\/?([0-9a-fA-F]{32})(\s+"[^"]*")?\)/g,
     (_, alt, id, title = "") => `![${alt}](/api/resources/${id.toLowerCase()}${title})`
   );
   out = out.replace(
-    /(^|[^!])\[([^\]]*)\]\(:\/?([0-9a-fA-F]{32})(#[^\s()"'<>]*)?(\s+"[^"]*")?\)/g,
+    /(^|[^!])\[([^[\]]*)\]\(:\/?([0-9a-fA-F]{32})(#[^\s()"'<>]*)?(\s+"[^"]*")?\)/g,
     (_, before, text, id, fragment = "", title = "") =>
       `${before}[${text}](/joplin-item/${id.toLowerCase()}${fragment}${title})`
   );
@@ -90,11 +146,11 @@ export function joplinToRichMarkdown(markdown: string): string {
 export function richMarkdownToJoplin(markdown: string): string {
   if (!markdown) return "";
   let out = markdown.replace(
-    /!\[([^\]]*)\]\((?:https?:\/\/[^/\s)]+)?\/api\/resources\/([0-9a-fA-F]{32})(\s+"[^"]*")?\)/g,
+    /!\[([^[\]]*)\]\((?:https?:\/\/[^/\s)]+)?\/api\/resources\/([0-9a-fA-F]{32})(\s+"[^"]*")?\)/g,
     (_, alt, id, title = "") => `![${alt}](:/${id.toLowerCase()}${title})`
   );
   out = out.replace(
-    /(^|[^!])\[([^\]]*)\]\((?:https?:\/\/[^/\s)]+)?\/joplin-item\/([0-9a-fA-F]{32})(#[^\s()"'<>]*)?(\s+"[^"]*")?\)/g,
+    /(^|[^!])\[([^[\]]*)\]\((?:https?:\/\/[^/\s)]+)?\/joplin-item\/([0-9a-fA-F]{32})(#[^\s()"'<>]*)?(\s+"[^"]*")?\)/g,
     (_, before, text, id, fragment = "", title = "") =>
       `${before}[${text}](:/${id.toLowerCase()}${fragment}${title})`
   );
@@ -103,15 +159,15 @@ export function richMarkdownToJoplin(markdown: string): string {
 
 /** Converts Joplin :/id img & link tags in HTML notes to web URLs before TipTap WYSIWYG editing. */
 export function joplinToRichHtml(html: string): string {
-  if (!html) return "";
-  let out = html.replace(
-    /<img([^>]*?)\ssrc=(["']):\/?([0-9a-fA-F]{32})\2([^>]*)>/gi,
-    (_, before, _quote, id, after) => `<img${before} src="/api/resources/${id.toLowerCase()}"${after}>`
+  if (!html || !html.includes(":")) return html || "";
+  let out = html.replace(/<img\b[^<>]*>/gi, (tag) =>
+    tag.replace(/\ssrc=(["']):\/?([0-9a-fA-F]{32})\1/i, (_, _quote, id) => ` src="/api/resources/${id.toLowerCase()}"`)
   );
-  out = out.replace(
-    /<a([^>]*?)\shref=(["']):\/?([0-9a-fA-F]{32})(#[^"'<>\s]*)?\2([^>]*)>/gi,
-    (_, before, _quote, id, fragment = "", after) =>
-      `<a${before} href="/joplin-item/${id.toLowerCase()}${fragment}"${after}>`
+  out = out.replace(/<a\b[^<>]*>/gi, (tag) =>
+    tag.replace(
+      /\shref=(["']):\/?([0-9a-fA-F]{32})(#[^"'<>\s]*)?\1/i,
+      (_, _quote, id, fragment = "") => ` href="/joplin-item/${id.toLowerCase()}${fragment}"`
+    )
   );
   return out;
 }
@@ -119,14 +175,17 @@ export function joplinToRichHtml(html: string): string {
 /** Converts /api/resources/<id> and /joplin-item/<id> HTML attributes back to Joplin :/id after TipTap editing. */
 export function richHtmlToJoplin(html: string): string {
   if (!html) return "";
-  let out = html.replace(
-    /<img([^>]*?)\ssrc=(["'])(?:https?:\/\/[^/"']+)?\/api\/resources\/([0-9a-fA-F]{32})\2([^>]*)>/gi,
-    (_, before, quote, id, after) => `<img${before} src=${quote}:/${id.toLowerCase()}${quote}${after}>`
+  let out = html.replace(/<img\b[^<>]*>/gi, (tag) =>
+    tag.replace(
+      /\ssrc=(["'])(?:https?:\/\/[^/"']+)?\/api\/resources\/([0-9a-fA-F]{32})\1/i,
+      (_, quote, id) => ` src=${quote}:/${id.toLowerCase()}${quote}`
+    )
   );
-  out = out.replace(
-    /<a([^>]*?)\shref=(["'])(?:https?:\/\/[^/"']+)?\/joplin-item\/([0-9a-fA-F]{32})(#[^"'<>\s]*)?\2([^>]*)>/gi,
-    (_, before, quote, id, fragment = "", after) =>
-      `<a${before} href=${quote}:/${id.toLowerCase()}${fragment}${quote}${after}>`
+  out = out.replace(/<a\b[^<>]*>/gi, (tag) =>
+    tag.replace(
+      /\shref=(["'])(?:https?:\/\/[^/"']+)?\/joplin-item\/([0-9a-fA-F]{32})(#[^"'<>\s]*)?\1/i,
+      (_, quote, id, fragment = "") => ` href=${quote}:/${id.toLowerCase()}${fragment}${quote}`
+    )
   );
   return out;
 }
