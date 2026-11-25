@@ -98,6 +98,7 @@ export function buildTitleRule(titleDetail: TitleDetail = DEFAULT_TITLE_DETAIL):
   const commonGuards =
     'Never repeat information already in the date (no "Nov 2024" next to 2024-11-30 unless the period differs from the date). ' +
     'Never put full account numbers in titles: last 4 digits only (e.g. "…3207"). ' +
+    'When the content lists several cards/accounts/people (e.g. one combined statement filed once per card), use the one named in the current title or notebook path. ' +
     'NEVER include a file extension (.pdf, .png, .jpg, etc.).';
 
   if (titleDetail === 'short') {
@@ -194,6 +195,8 @@ export interface UniquenessTargetNote {
   noteId: string;
   createdDate: string;
   currentTitle: string;
+  /** Notebook path; tells copies of one combined document filed per card/account apart */
+  notebookPath?: string;
   currentSuggestion: string;
   excerpt: string;
 }
@@ -236,6 +239,7 @@ export function buildUniquenessUserPrompt(input: {
       `id: ${target.noteId}`,
       `createdDate: ${target.createdDate}`,
       `currentTitle: ${sanitizeLine(target.currentTitle) || '(untitled)'}`,
+      ...(target.notebookPath ? [`notebook: ${sanitizeLine(target.notebookPath)}`] : []),
       `currentSuggestion: ${sanitizeLine(target.currentSuggestion)}`,
       `excerpt: ${target.excerpt || '(empty)'}`
     );
@@ -962,6 +966,8 @@ export function buildOrganizeUserPrompt(input: {
 
 export function buildRetitleUserPrompt(input: {
   currentTitle: string;
+  /** Notebook path of the note; names the card/account when one document is filed per card */
+  notebookPath?: string;
   createdDate: string;
   bodyText: string;
   attachmentFilenames: string[];
@@ -969,6 +975,7 @@ export function buildRetitleUserPrompt(input: {
 }): string {
   return [
     `Current title: ${sanitizeLine(input.currentTitle) || '(untitled)'}`,
+    ...(input.notebookPath ? [`Notebook: ${sanitizeLine(input.notebookPath)}`] : []),
     `Created date: ${input.createdDate}`,
     'Body text:',
     input.bodyText || '(empty)',
@@ -2533,6 +2540,7 @@ export class OrganizerService {
         role: 'user',
         content: buildRetitleUserPrompt({
           currentTitle: note.title,
+          notebookPath: buildNotebookPaths(entry).pathById.get(note.parentId) ?? '',
           createdDate: formatIsoDate(note.createdTime || note.updatedTime),
           bodyText,
           attachmentFilenames,
@@ -2896,6 +2904,7 @@ export class OrganizerService {
               const userPrompt = job.mode === 'retitle'
                 ? buildRetitleUserPrompt({
                     currentTitle: note.title,
+                    notebookPath: item.currentNotebookPath,
                     createdDate: formatIsoDate(note.createdTime || note.updatedTime),
                     bodyText,
                     attachmentFilenames,
@@ -3106,6 +3115,7 @@ export class OrganizerService {
             noteId: item.noteId,
             createdDate: formatIsoDate(liveNote?.createdTime || liveNote?.updatedTime || item.updatedTime),
             currentTitle: liveNote?.title ?? item.currentTitle,
+            notebookPath: item.currentNotebookPath,
             currentSuggestion: item.suggestion!.title,
             excerpt,
           });
