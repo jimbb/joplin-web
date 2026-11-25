@@ -859,4 +859,62 @@ describe("OrganizePage", () => {
     expect(undoCalls[0].body).toEqual({ limit: 150 });
     expect(undoCalls[1].body).toEqual({ limit: 150 });
   }, 40_000);
+
+  it("shows job title length in header and Made unique / collision badges on review rows", async () => {
+    const job = makeJob({
+      mode: "retitle",
+      titleDetail: "detailed",
+      progress: { total: 2, done: 2, failed: 0 },
+      totalItems: 2,
+      items: [
+        {
+          noteId: id("d"),
+          currentTitle: "scan_1.pdf",
+          currentNotebookId: id("1"),
+          currentNotebookPath: "Pending to sort",
+          updatedTime: 1001,
+          status: "done",
+          titleMadeUnique: true,
+          suggestion: {
+            title: "2026-05-12 PrimeCredit – Credit Card Statement – …3207",
+            notebookId: "",
+            tags: [],
+            confidence: 0.92,
+            documentDate: "2026-05-12",
+            reason: "Extracted statement details.",
+          },
+        },
+        {
+          noteId: id("e"),
+          currentTitle: "scan_2.pdf",
+          currentNotebookId: id("1"),
+          currentNotebookPath: "Pending to sort",
+          updatedTime: 1002,
+          status: "done",
+          titleCollision: 3,
+          suggestion: {
+            title: "2023-10-26 HMRC – Tax Return",
+            notebookId: "",
+            tags: [],
+            confidence: 0.88,
+            documentDate: "2023-10-26",
+            reason: "Tax return.",
+          },
+        },
+      ],
+    });
+    mockFetch((call) => {
+      const url = new URL(call.path, "http://localhost");
+      if (url.pathname === "/api/notebooks") return jsonResponse(notebooks);
+      if (url.pathname === "/api/tags") return jsonResponse(tags);
+      if (url.pathname === `/api/organize/jobs/${job.id}`) return jsonResponse(job);
+      if (url.pathname === "/api/organize/jobs") return jsonResponse({ jobs: [] });
+      return undefined;
+    });
+
+    renderOrganizePage();
+    expect(await screen.findByText("Detailed titles")).toBeTruthy();
+    expect(screen.getByText("Made unique")).toBeTruthy();
+    expect(screen.getByText("Same title as 3 other notes")).toBeTruthy();
+  });
 });

@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen } from "@testing-library/react";
 import { Notebook } from "@/lib/types";
+import { TITLE_DETAIL_STORAGE_KEY } from "@/lib/ui-constants";
 import { StartOrganizeDialog } from "./StartOrganizeDialog";
 import { renderWithProviders } from "@/test/render";
 
@@ -22,6 +23,10 @@ const notebooks: Notebook[] = [
   { id: id("6"), title: "Vault", parentId: "", children: [], noteCount: 2, encrypted: true },
   { id: id("7"), title: "Projects", parentId: "", children: [], noteCount: 3 },
 ];
+
+beforeEach(() => {
+  localStorage.clear();
+});
 
 afterEach(cleanup);
 
@@ -64,7 +69,7 @@ describe("StartOrganizeDialog", () => {
 
     expect(screen.getByText("2 excluded")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Start organizing (3)" }));
-    expect(onConfirm).toHaveBeenCalledWith([id("1"), id("3")]);
+    expect(onConfirm).toHaveBeenCalledWith([id("1"), id("3")], "standard");
   });
 
   it("shows Previous jobs (N) and running-job warning with Cancel and start option", () => {
@@ -108,6 +113,27 @@ describe("StartOrganizeDialog", () => {
     expect(onViewRunningJob).toHaveBeenCalledWith("runjob1234567890abcdef1234567890");
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel the running job and start" }));
-    expect(onCancelAndStart).toHaveBeenCalledWith("runjob1234567890abcdef1234567890", [id("1")]);
+    expect(onCancelAndStart).toHaveBeenCalledWith("runjob1234567890abcdef1234567890", [id("1")], "standard");
+  });
+
+  it("renders Title length control in retitle mode, remembers selection, and passes it on confirm", () => {
+    const onConfirm = vi.fn();
+    renderWithProviders(
+      <StartOrganizeDialog
+        open
+        onOpenChange={vi.fn()}
+        selectedCount={2}
+        notebooks={notebooks}
+        mode="retitle"
+        onConfirm={onConfirm}
+      />
+    );
+
+    expect(screen.getByRole("button", { name: "Standard" }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Short" }));
+    expect(localStorage.getItem(TITLE_DETAIL_STORAGE_KEY)).toBe("short");
+    expect(screen.getByText(/BOCHK/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Start retitling (2)" }));
+    expect(onConfirm).toHaveBeenCalledWith([], "short");
   });
 });

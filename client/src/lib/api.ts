@@ -35,6 +35,7 @@ import {
   TaskCategory,
   TaskCategoryInput,
   TasksResponse,
+  TitleDetail,
   SearchResult,
   LoginResponse,
   TrashedNotebook,
@@ -916,6 +917,7 @@ export async function createOrganizeJob(payload: {
   includeSubNotebooks?: boolean;
   excludeNotebookIds?: string[];
   mode?: OrganizeJobMode;
+  titleDetail?: TitleDetail;
 }): Promise<{ jobId: string }> {
   return request<{ jobId: string }>("/api/organize/jobs", {
     method: "POST",
@@ -929,6 +931,7 @@ export async function previewOrganizeJob(payload: {
   sourceNotebookIds?: string[];
   includeSubNotebooks?: boolean;
   mode?: OrganizeJobMode;
+  titleDetail?: TitleDetail;
 }): Promise<{ matched: number }> {
   return request<{ matched: number }>("/api/organize/jobs", {
     method: "POST",
@@ -936,10 +939,10 @@ export async function previewOrganizeJob(payload: {
   });
 }
 
-export async function suggestNoteTitle(noteId: string): Promise<{ title: string }> {
+export async function suggestNoteTitle(noteId: string, titleDetail?: TitleDetail): Promise<{ title: string }> {
   return request<{ title: string }>("/api/organize/retitle", {
     method: "POST",
-    body: JSON.stringify({ noteId }),
+    body: JSON.stringify(titleDetail ? { noteId, titleDetail } : { noteId }),
   });
 }
 

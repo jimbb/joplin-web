@@ -290,6 +290,7 @@ export interface OrganizeStatus {
 export type OrganizeJobStatus = 'running' | 'done' | 'cancelled' | 'failed';
 export type OrganizeItemStatus = 'pending' | 'running' | 'done' | 'failed';
 export type OrganizeJobMode = 'organize' | 'retitle';
+export type TitleDetail = 'short' | 'standard' | 'detailed';
 
 export interface OrganizeSuggestion {
   title: string;
@@ -312,6 +313,10 @@ export interface OrganizeJobItem {
   suggestion?: OrganizeSuggestion;
   /** A completed retitle suggestion equal to the current title needs no apply action. */
   unchanged?: boolean;
+  /** True when the uniqueness pass changed this item's title to avoid a collision. */
+  titleMadeUnique?: boolean;
+  /** Number of other notes sharing this suggested title when a collision could not be resolved. */
+  titleCollision?: number;
   applied?: boolean;
   applyStatus?: 'ok' | 'conflict' | 'error';
   applyError?: string;
@@ -334,6 +339,7 @@ export interface OrganizeJobProgress {
 export interface OrganizeJobSummary {
   id: string;
   mode: OrganizeJobMode;
+  titleDetail: TitleDetail;
   status: OrganizeJobStatus;
   error?: string;
   progress: OrganizeJobProgress;
@@ -378,6 +384,7 @@ export interface OrganizeTargetsResponse {
 export interface OrganizeJobResponse {
   id: string;
   mode: OrganizeJobMode;
+  titleDetail: TitleDetail;
   status: OrganizeJobStatus;
   error?: string;
   excludeNotebookIds: string[];

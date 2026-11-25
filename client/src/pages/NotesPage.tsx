@@ -14,7 +14,7 @@ import { BulkUpdateProgress, useBulkUpdateNotes, useCreateNote, useUpdateNote } 
 import { useCreateSavedSearch, usePreferences, useRecordRecentRead } from "@/hooks/use-preferences";
 import { useNoteSelection } from "@/hooks/use-note-selection";
 import { findNotebookById, flattenNotebooks } from "@/lib/notebooks";
-import { BatchNoteItem, BatchNoteResult, NoteListItem } from "@/lib/types";
+import { BatchNoteItem, BatchNoteResult, NoteListItem, TitleDetail } from "@/lib/types";
 import { toast } from "sonner";
 import { noteDisplayTitle } from "@/lib/format";
 import { useWriteState } from "@/hooks/use-write-state";
@@ -473,13 +473,14 @@ export function NotesPage() {
     }
   };
 
-  const handleStartOrganize = async (excludeNotebookIds: string[]) => {
+  const handleStartOrganize = async (excludeNotebookIds: string[], titleDetail: TitleDetail) => {
     if (!organizeTargets || organizeTargets.notes.length === 0) return;
     setOrganizeConflict(null);
     try {
       const { jobId } = await createOrganizeJob.mutateAsync({
         noteIds: organizeTargets.notes.map((n) => n.id),
         excludeNotebookIds,
+        titleDetail,
         ...(organizeTargets.mode === "retitle" ? { mode: "retitle" as const } : {}),
       });
       setOrganizeTargets(null);
@@ -502,12 +503,16 @@ export function NotesPage() {
     }
   };
 
-  const handleCancelAndStartOrganize = async (runningJobId: string, excludeNotebookIds: string[]) => {
+  const handleCancelAndStartOrganize = async (
+    runningJobId: string,
+    excludeNotebookIds: string[],
+    titleDetail: TitleDetail
+  ) => {
     if (!organizeTargets || organizeTargets.notes.length === 0) return;
     try {
       await cancelOrganizeJob.mutateAsync(runningJobId);
       setOrganizeConflict(null);
-      await handleStartOrganize(excludeNotebookIds);
+      await handleStartOrganize(excludeNotebookIds, titleDetail);
     } catch (err) {
       toast.error("Could not replace running Auto-organize job", {
         description: err instanceof Error ? err.message : undefined,
@@ -767,8 +772,10 @@ export function NotesPage() {
           selection.exitSelectionMode();
           navigate(`/organize/${runningJobId}`);
         }}
-        onCancelAndStart={(runningJobId, excludeIds) => void handleCancelAndStartOrganize(runningJobId, excludeIds)}
-        onConfirm={(excludeIds) => void handleStartOrganize(excludeIds)}
+        onCancelAndStart={(runningJobId, excludeIds, titleDetail) =>
+          void handleCancelAndStartOrganize(runningJobId, excludeIds, titleDetail)
+        }
+        onConfirm={(excludeIds, titleDetail) => void handleStartOrganize(excludeIds, titleDetail)}
         mode={organizeTargets?.mode}
       />
     </AppLayout>

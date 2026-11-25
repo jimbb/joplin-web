@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import {
   AlertTriangle,
   Check,
+  ChevronDown,
   Circle,
   Columns2,
   Eye,
@@ -16,7 +17,7 @@ import {
   Sparkles,
   Type,
 } from "lucide-react";
-import { MARKUP_HTML, Note } from "@/lib/types";
+import { MARKUP_HTML, Note, TitleDetail } from "@/lib/types";
 import { ApiError, getConflictNote, isReadOnlyError } from "@/lib/api";
 import { invalidateLists } from "@/hooks/use-mutations";
 import { useNoteSaver } from "@/hooks/use-note-saver";
@@ -28,6 +29,14 @@ import { TagEditor } from "@/components/tags/TagEditor";
 import { MarkdownRenderer } from "@/components/common/MarkdownRenderer";
 import { Button } from "@/components/ui/button";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -35,6 +44,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { TITLE_DETAIL_LABELS, TITLE_DETAIL_OPTIONS, useTitleDetail } from "@/components/organize/TitleDetailControl";
 import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { getConnectionSnapshot, isTemporaryFailure, setNoteUnsaved } from "@/lib/connection";
@@ -122,6 +132,7 @@ export function NoteEditor({ note, readOnly = false, focusTitle = false, initial
   const [voiceModalOpen, setVoiceModalOpen] = useState(false);
   const [titleSuggestion, setTitleSuggestion] = useState<string | null>(null);
   const [titleSuggestionLoading, setTitleSuggestionLoading] = useState(false);
+  const [titleDetail, setTitleDetail] = useTitleDetail();
   const editorRef = useRef<MarkdownEditorHandle>(null);
   const richEditorRef = useRef<RichEditorHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -669,29 +680,62 @@ export function NoteEditor({ note, readOnly = false, focusTitle = false, initial
             )}
           />
           {organizeStatus?.enabled && !readOnly && !note.encrypted && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-8 shrink-0 gap-1 text-xs text-muted-foreground"
-              disabled={titleSuggestionLoading}
-              onClick={async () => {
-                setTitleSuggestionLoading(true);
-                try {
-                  const result = await suggestNoteTitle(note.id);
-                  setTitleSuggestion(result.title);
-                } catch (err) {
-                  toast.error("Could not suggest a title", { description: err instanceof Error ? err.message : undefined });
-                } finally {
-                  setTitleSuggestionLoading(false);
-                }
-              }}
-              aria-label="Suggest title"
-              title="Suggest title"
-            >
-              {titleSuggestionLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-              <span className="hidden sm:inline">Suggest title</span>
-            </Button>
+            <div className="inline-flex shrink-0 items-center rounded-md border border-border/60 bg-background">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8 rounded-r-none gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
+                disabled={titleSuggestionLoading}
+                onClick={async () => {
+                  setTitleSuggestionLoading(true);
+                  try {
+                    const result = await suggestNoteTitle(note.id, titleDetail);
+                    setTitleSuggestion(result.title);
+                  } catch (err) {
+                    toast.error("Could not suggest a title", { description: err instanceof Error ? err.message : undefined });
+                  } finally {
+                    setTitleSuggestionLoading(false);
+                  }
+                }}
+                aria-label="Suggest title"
+                title={`Suggest title (${TITLE_DETAIL_LABELS[titleDetail]})`}
+              >
+                {titleSuggestionLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                <span className="hidden sm:inline">Suggest title</span>
+              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={titleSuggestionLoading}
+                    aria-label="Title length"
+                    title={`Title length: ${TITLE_DETAIL_LABELS[titleDetail]}`}
+                    className="h-8 rounded-l-none border-l border-border/60 px-1.5 text-xs text-muted-foreground hover:text-foreground"
+                  >
+                    <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-72">
+                  <DropdownMenuLabel className="text-xs text-muted-foreground font-medium">Title length</DropdownMenuLabel>
+                  <DropdownMenuRadioGroup
+                    value={titleDetail}
+                    onValueChange={(next) => setTitleDetail(next as TitleDetail)}
+                  >
+                    {TITLE_DETAIL_OPTIONS.map((opt) => (
+                      <DropdownMenuRadioItem key={opt.value} value={opt.value} className="items-start py-1.5">
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-medium text-foreground">{opt.label}</div>
+                          <div className="truncate text-[11px] text-muted-foreground">{opt.example}</div>
+                        </div>
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
           )}
         </div>
         {titleSuggestion && (

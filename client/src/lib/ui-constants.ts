@@ -26,3 +26,6 @@ export const TASKS_GROUP_BY_CATEGORY_STORAGE_KEY = "joplin-tasks-group-by-catego
 
 /** localStorage key holding the JSON array of category keys hidden from Tasks Hub's All view */
 export const TASKS_HIDDEN_CATEGORIES_STORAGE_KEY = "joplin-tasks-hidden-categories";
+
+/** localStorage key holding the remembered AI title detail level ("short" | "standard" | "detailed") */
+export const TITLE_DETAIL_STORAGE_KEY = "joplin-organize-title-detail";

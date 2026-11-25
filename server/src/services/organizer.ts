@@ -24,6 +24,7 @@ import type {
   OrganizeUndoResponse,
   OrganizeUsage,
   RawJoplinItem,
+  TitleDetail,
 } from '../types/index.js';
 import { CacheEntry, isConflictNote, noteCache } from './note-cache.js';
 import { assertValidId, MAX_BATCH_SIZE, noteWriter, WriteValidationError } from './note-writer.js';
@@ -56,8 +57,85 @@ export const ORGANIZE_DOCUMENT_TYPE_TAGS = [
 
 const ORGANIZE_DOCUMENT_TYPE_TAG_SET = new Set<string>(ORGANIZE_DOCUMENT_TYPE_TAGS);
 
-/** Verbatim system prompt instructions template kept byte-identical across every request in a job. */
-export const ORGANIZE_SYSTEM_INSTRUCTIONS = `You organize personal notes and scanned document notes into a user's existing Joplin taxonomy.
+/** Supported title detail levels for Auto-organize and Auto-retitle. */
+export const VALID_TITLE_DETAILS = ['short', 'standard', 'detailed'] as const;
+
+/** Default title detail level for new jobs and one-off suggestions. */
+export const DEFAULT_TITLE_DETAIL: TitleDetail = 'standard';
+
+/** Soft character budgets per title detail level. */
+export const TITLE_MAX_CHARS: Record<TitleDetail, number> = {
+  short: 80,
+  standard: 100,
+  detailed: 140,
+};
+
+const MAX_UNIQUENESS_CHUNK_SIZE = 15;
+const MAX_UNIQUENESS_EXCERPT_CHARS = 1200;
+const MAX_UNIQUENESS_CONTEXT_NOTES = 5;
+const UNIQUENESS_SYSTEM_HEADER = 'Task: Disambiguate colliding note titles.';
+const RETITLE_SYSTEM_HEADER = 'You suggest concise English titles for personal notes and scanned documents.';
+
+/** Returns true when `value` is a valid title detail level. */
+export function isValidTitleDetail(value: unknown): value is TitleDetail {
+  return value === 'short' || value === 'standard' || value === 'detailed';
+}
+
+/** Validates an optional `titleDetail` input, defaulting to `'standard'` and throwing 400 on unknown values. */
+export function parseTitleDetail(value: unknown): TitleDetail {
+  if (value === undefined) return DEFAULT_TITLE_DETAIL;
+  if (isValidTitleDetail(value)) return value;
+  throw new OrganizeValidationError('titleDetail must be short, standard, or detailed');
+}
+
+/** Normalizes a title for case- and whitespace-insensitive collision comparison. */
+export function normalizeTitleKey(title: string): string {
+  return title.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/** Returns the title-formatting rule block for the given title detail level. */
+export function buildTitleRule(titleDetail: TitleDetail = DEFAULT_TITLE_DETAIL): string {
+  const commonGuards =
+    'Never repeat information already in the date (no "Nov 2024" next to 2024-11-30 unless the period differs from the date). ' +
+    'Never put full account numbers in titles: last 4 digits only (e.g. "…3207"). ' +
+    'NEVER include a file extension (.pdf, .png, .jpg, etc.).';
+
+  if (titleDetail === 'short') {
+    return (
+      `Title detail level: short\n` +
+      `- "title": ALWAYS write titles in English, formatted as "YYYY-MM-DD Issuer – Document type" (using an en-dash " – ", e.g. "2024-11-30 BOCHK – Statement"), ` +
+      `where the date is the document's own date (from the document text, OCR, or filename) or else the note's created date. ` +
+      `Keep titles concise (max ~${TITLE_MAX_CHARS.short} characters). ${commonGuards} ` +
+      `When the note's current title is already meaningful and descriptive and already satisfies the short level, keep the current title unchanged (return it verbatim).`
+    );
+  }
+  if (titleDetail === 'detailed') {
+    return (
+      `Title detail level: detailed\n` +
+      `- "title": ALWAYS write titles in English. Start from "YYYY-MM-DD Issuer – Document type" (using an en-dash " – "), ` +
+      `where the date is the document's own date (from the document text, OCR, or filename) or else the note's created date, ` +
+      `and add up to 3 distinguishing details from the content after a second " – " when present: card/account last 4 digits ("…3207"), person ("Ting"), ` +
+      `tax year or billing period when it differs from the document date ("2022-23", "Q3 2024"), or a short policy/invoice/reference number ` +
+      `(e.g. "2023-10-26 HMRC – Self Assessment Tax Return – Ting, 2021-22, SA100"). ` +
+      `If no distinguishing detail is available in the content, omit the extra part. Keep titles under ~${TITLE_MAX_CHARS.detailed} characters. ${commonGuards} ` +
+      `Keep a meaningful descriptive current title unchanged ONLY when it already satisfies the detailed level (already includes the distinguishing details present in the content).`
+    );
+  }
+  return (
+    `Title detail level: standard\n` +
+    `- "title": ALWAYS write titles in English. Start from "YYYY-MM-DD Issuer – Document type" (using an en-dash " – "), ` +
+    `where the date is the document's own date (from the document text, OCR, or filename) or else the note's created date, ` +
+    `and add the ONE detail that best tells this document apart from other documents of the same issuer and type after a second " – ", when the content has one: ` +
+    `card/account last 4 digits ("…3207"), person ("Ting"), tax year or period when it differs from the document date ("2022-23", "Q3 2024"), or a short policy/invoice/reference number. ` +
+    `Format: "YYYY-MM-DD Issuer – Document type – Detail" (e.g. "2023-10-26 HMRC – Self Assessment Tax Return – Ting 2021-22", "2026-05-12 PrimeCredit – Credit Card Statement – …3207"). ` +
+    `If no distinguishing detail is available in the content, omit the third part (same as short). Keep titles under ~${TITLE_MAX_CHARS.standard} characters. ${commonGuards} ` +
+    `Keep a meaningful descriptive current title unchanged ONLY when it already satisfies the standard level (already includes the distinguishing detail when the content has one).`
+  );
+}
+
+/** Builds the system instruction preamble for full Auto-organize jobs at the given title detail level. */
+export function buildOrganizeInstructions(titleDetail: TitleDetail = DEFAULT_TITLE_DETAIL): string {
+  return `You organize personal notes and scanned document notes into a user's existing Joplin taxonomy.
 Return ONLY a valid JSON object matching this exact schema:
 {
   "title": string,
@@ -69,22 +147,108 @@ Return ONLY a valid JSON object matching this exact schema:
 }
 
 Rules:
-- "title": ALWAYS write titles in English, formatted as "YYYY-MM-DD Issuer – Document type" (using an en-dash " – "), where the date is the document's own date (from the document text, OCR, or filename) or else the note's created date. Keep titles concise (max ~80 characters) and NEVER include a file extension (.pdf, .png, .jpg, etc.). When the note's current title is already meaningful and descriptive, keep the current title unchanged (return it verbatim).
+${buildTitleRule(titleDetail)}
 - "notebookId": MUST be one of the allowed target notebook IDs listed below. NEVER suggest an excluded notebook ID.
 - "tags": At most 2 lowercase-hyphenated tags: first, exactly one document type from [${ORGANIZE_DOCUMENT_TYPE_TAGS.join(', ')}]; plus optionally one issuer tag (lowercase, hyphenated, e.g. "hsbc", "hang-seng", "john-lewis"). Existing account tags listed below may still be used when they clearly fit.
 - "confidence": Number from 0 to 1 reflecting your certainty (use < 0.7 when ambiguous or uncertain).
 - "documentDate": Document date formatted as "YYYY-MM-DD", or null if none is found.
 - "reason": One short English sentence explaining the suggestion.`;
+}
 
-/** Smaller prompt used for retitle-only jobs and the editor's one-off suggestion. */
-export const RETITLE_SYSTEM_INSTRUCTIONS = `You suggest concise English titles for personal notes and scanned documents.
+/** Builds the system prompt for retitle-only jobs and the editor's one-off suggestion. */
+export function buildRetitleSystemPrompt(titleDetail: TitleDetail = DEFAULT_TITLE_DETAIL): string {
+  return `${RETITLE_SYSTEM_HEADER}
 Return ONLY a valid JSON object matching this exact schema:
 { "title": string, "confidence": number, "reason": string }
 
 Rules:
-- "title": ALWAYS write titles in English. Documents use "YYYY-MM-DD Issuer – Document type" with an en-dash. Use the document date from the text, OCR, or filename, otherwise the note's created date. Keep titles concise (max ~80 characters) and NEVER include file extensions. Keep a meaningful descriptive current title unchanged.
+${buildTitleRule(titleDetail)}
 - "confidence": Number from 0 to 1 reflecting certainty.
 - "reason": One short English sentence explaining the suggestion.`;
+}
+
+/** Builds the system prompt for disambiguating a group of colliding note titles. */
+export function buildUniquenessSystemPrompt(titleDetail: TitleDetail = DEFAULT_TITLE_DETAIL): string {
+  const maxChars = Math.max(TITLE_MAX_CHARS[titleDetail], 100);
+  return `${UNIQUENESS_SYSTEM_HEADER}
+Title detail level: ${titleDetail}
+Several notes received the same title (or matched an existing note's title). Give each requested note a DISTINCT English title in the same format by adding the distinguishing detail from its excerpt (card/account last 4 digits "…3207", person, tax year or period when it differs from the date, or short policy/invoice/reference number).
+
+Return ONLY a valid JSON object matching this exact schema:
+{
+  "titles": {
+    "<noteId>": "<distinct English title>"
+  }
+}
+
+Rules:
+- Include EVERY requested note id as a key in "titles" with a non-empty string value.
+- Every returned title MUST be unique (case- and whitespace-insensitive) and MUST differ from any listed existing note titles (which cannot be renamed).
+- Keep the existing "YYYY-MM-DD Issuer – Document type" format and append the distinguishing detail after " – " (max ~${maxChars} characters).
+- Never repeat information already in the date unless the period differs from the date.
+- Never put full account numbers in titles: last 4 digits only ("…1234").
+- NEVER include a file extension (.pdf, .png, .jpg, etc.).`;
+}
+
+export interface UniquenessTargetNote {
+  noteId: string;
+  createdDate: string;
+  currentTitle: string;
+  currentSuggestion: string;
+  excerpt: string;
+}
+
+export interface UniquenessExistingNote {
+  createdDate: string;
+  title: string;
+  excerpt: string;
+}
+
+/** Builds the user prompt for one uniqueness disambiguation chunk. */
+export function buildUniquenessUserPrompt(input: {
+  collidingTitle: string;
+  targetNotes: UniquenessTargetNote[];
+  existingNotes?: UniquenessExistingNote[];
+  alreadyTakenTitles?: string[];
+}): string {
+  const lines: string[] = [`Colliding title: ${sanitizeLine(input.collidingTitle)}`];
+
+  if (input.existingNotes && input.existingNotes.length > 0) {
+    lines.push('', 'Existing notes with this title (do NOT rename these; returned titles must differ from them):');
+    for (const ex of input.existingNotes) {
+      lines.push(
+        `--- EXISTING NOTE ---`,
+        `title: ${sanitizeLine(ex.title)}`,
+        `createdDate: ${ex.createdDate}`,
+        `excerpt: ${ex.excerpt || '(empty)'}`
+      );
+    }
+  }
+
+  if (input.alreadyTakenTitles && input.alreadyTakenTitles.length > 0) {
+    lines.push('', 'Already used titles to avoid:', ...input.alreadyTakenTitles.map((t) => `- ${sanitizeLine(t)}`));
+  }
+
+  lines.push('', 'Notes to give distinct titles:');
+  for (const target of input.targetNotes) {
+    lines.push(
+      `--- NOTE ${target.noteId} ---`,
+      `id: ${target.noteId}`,
+      `createdDate: ${target.createdDate}`,
+      `currentTitle: ${sanitizeLine(target.currentTitle) || '(untitled)'}`,
+      `currentSuggestion: ${sanitizeLine(target.currentSuggestion)}`,
+      `excerpt: ${target.excerpt || '(empty)'}`
+    );
+  }
+
+  return lines.join('\n');
+}
+
+/** Verbatim system prompt instructions template (short level) kept for backward compatibility. */
+export const ORGANIZE_SYSTEM_INSTRUCTIONS = buildOrganizeInstructions('short');
+
+/** Smaller prompt used for retitle-only jobs (short level) kept for backward compatibility. */
+export const RETITLE_SYSTEM_INSTRUCTIONS = buildRetitleSystemPrompt('short');
 
 const MAX_BODY_CHARS = 2000;
 const MAX_OCR_CHARS = 6000;
@@ -151,6 +315,7 @@ interface StartJobInput {
   includeSubNotebooks?: unknown;
   excludeNotebookIds?: unknown;
   mode?: unknown;
+  titleDetail?: unknown;
 }
 
 interface InternalJobItem extends OrganizeJobItem {
@@ -160,6 +325,7 @@ interface InternalJobItem extends OrganizeJobItem {
 interface InternalOrganizeJob {
   id: string;
   mode: OrganizeJobMode;
+  titleDetail: TitleDetail;
   ownerKey: string;
   status: OrganizeJobStatus;
   error?: string;
@@ -415,6 +581,7 @@ function computeJobSummary(job: InternalOrganizeJob): OrganizeJobSummary {
   return {
     id: job.id,
     mode: job.mode ?? 'organize',
+    titleDetail: isValidTitleDetail(job.titleDetail) ? job.titleDetail : 'short',
     status: job.status,
     ...(job.error ? { error: job.error } : {}),
     progress: {
@@ -440,6 +607,7 @@ function sortSummariesNewestFirst(summaries: OrganizeJobSummary[]): void {
 
 function normalizeLoadedJob(raw: InternalOrganizeJob): InternalOrganizeJob {
   if (raw.mode !== 'retitle') raw.mode = 'organize';
+  if (!isValidTitleDetail(raw.titleDetail)) raw.titleDetail = 'short';
   for (const item of raw.items) {
     if (item.status === 'running') {
       item.status = 'pending';
@@ -467,7 +635,8 @@ function normalizeLoadedJob(raw: InternalOrganizeJob): InternalOrganizeJob {
  */
 export function buildOrganizeSystemPrompt(
   entry: CacheEntry,
-  excludeNotebookIds: ReadonlySet<string>
+  excludeNotebookIds: ReadonlySet<string>,
+  titleDetail: TitleDetail = DEFAULT_TITLE_DETAIL
 ): { systemPrompt: string; allowedNotebookIds: string[]; pathById: Map<string, string> } {
   const { pathById, activeNonEncryptedIds } = buildNotebookPaths(entry);
 
@@ -540,7 +709,7 @@ export function buildOrganizeSystemPrompt(
       : '- (none — keep current notebook)';
 
   const sections: string[] = [
-    ORGANIZE_SYSTEM_INSTRUCTIONS,
+    buildOrganizeInstructions(titleDetail),
     '',
     'Allowed target notebooks (id | Path | example titles):',
     allowedSection,
@@ -816,7 +985,7 @@ function unwrapJsonContent(raw: string): string {
   return fenced ? fenced[1].trim() : trimmed;
 }
 
-function normalizeSuggestedTitle(rawTitle: string, currentTitle: string): string {
+function normalizeSuggestedTitle(rawTitle: string, currentTitle: string, maxChars = MAX_TITLE_CHARS): string {
   const singleLine = sanitizeLine(rawTitle);
   const currentSingle = sanitizeLine(currentTitle);
   if (currentSingle && singleLine === currentSingle) {
@@ -824,10 +993,11 @@ function normalizeSuggestedTitle(rawTitle: string, currentTitle: string): string
   }
   const withoutExt = singleLine.replace(DOC_EXTENSION_RE, '').trim();
   const finalTitle = withoutExt || singleLine;
-  if (finalTitle.length <= MAX_TITLE_CHARS) return finalTitle;
-  const sliced = finalTitle.slice(0, MAX_TITLE_CHARS);
+  if (finalTitle.length <= maxChars) return finalTitle;
+  const sliced = finalTitle.slice(0, maxChars);
+  const minSpace = Math.floor(maxChars * 0.6);
   const lastSpace = sliced.lastIndexOf(' ');
-  return (lastSpace >= 50 ? sliced.slice(0, lastSpace) : sliced).trim();
+  return (lastSpace >= minSpace ? sliced.slice(0, lastSpace) : sliced).trim();
 }
 
 export interface ValidationOutcome {
@@ -886,6 +1056,7 @@ export function parseAndValidateSuggestion(
     currentTitle: string;
     currentNotebookId: string;
     allowedNotebookIds: ReadonlySet<string>;
+    titleDetail?: TitleDetail;
   }
 ): ValidationOutcome | ValidationFailure {
   let parsed: unknown;
@@ -943,7 +1114,8 @@ export function parseAndValidateSuggestion(
   if (typeTag) tags.push(typeTag);
   if (otherTag) tags.push(otherTag);
 
-  const title = normalizeSuggestedTitle(obj.title, context.currentTitle);
+  const maxTitleChars = TITLE_MAX_CHARS[context.titleDetail ?? DEFAULT_TITLE_DETAIL];
+  const title = normalizeSuggestedTitle(obj.title, context.currentTitle, maxTitleChars);
   const rawReason = sanitizeLine(obj.reason);
   const reason = rawReason.length > MAX_REASON_CHARS ? `${rawReason.slice(0, MAX_REASON_CHARS - 1).trimEnd()}…` : rawReason;
 
@@ -962,7 +1134,7 @@ export function parseAndValidateSuggestion(
 
 export function parseAndValidateRetitleSuggestion(
   rawContent: string,
-  context: { currentTitle: string }
+  context: { currentTitle: string; titleDetail?: TitleDetail }
 ): ValidationOutcome | ValidationFailure {
   let parsed: unknown;
   try {
@@ -983,7 +1155,8 @@ export function parseAndValidateRetitleSuggestion(
   if (typeof obj.reason !== 'string' || !sanitizeLine(obj.reason)) {
     return { ok: false, error: '"reason" must be a non-empty string' };
   }
-  const title = normalizeSuggestedTitle(obj.title, context.currentTitle);
+  const maxTitleChars = TITLE_MAX_CHARS[context.titleDetail ?? DEFAULT_TITLE_DETAIL];
+  const title = normalizeSuggestedTitle(obj.title, context.currentTitle, maxTitleChars);
   const reason = sanitizeLine(obj.reason);
   return {
     ok: true,
@@ -996,6 +1169,76 @@ export function parseAndValidateRetitleSuggestion(
       reason: reason.length > MAX_REASON_CHARS ? `${reason.slice(0, MAX_REASON_CHARS - 1).trimEnd()}…` : reason,
     },
   };
+}
+
+const DATE_PREFIX_RE = /^\d{4}-\d{2}-\d{2}\s+\S/;
+
+/**
+ * Validates the JSON returned by a uniqueness disambiguation LLM call.
+ * Checks every requested noteId is present with a non-empty, distinct title that keeps the
+ * original document date/en-dash format, has no file extension, and avoids `forbiddenKeys`.
+ */
+export function parseAndValidateUniquenessResponse(
+  rawContent: string,
+  context: {
+    targets: ReadonlyArray<{ noteId: string; currentSuggestion: string }>;
+    forbiddenKeys: ReadonlySet<string>;
+    titleDetail: TitleDetail;
+  }
+): { ok: true; titles: Map<string, string> } | ValidationFailure {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(unwrapJsonContent(rawContent));
+  } catch {
+    return { ok: false, error: 'Uniqueness output is not valid JSON' };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, error: 'Uniqueness JSON root must be an object' };
+  }
+  const root = parsed as Record<string, unknown>;
+  const rawMap = root.titles;
+  if (!rawMap || typeof rawMap !== 'object' || Array.isArray(rawMap)) {
+    return { ok: false, error: '"titles" must be an object mapping noteId to title' };
+  }
+  const titlesObj = rawMap as Record<string, unknown>;
+  const maxChars = Math.max(TITLE_MAX_CHARS[context.titleDetail], 100);
+  const result = new Map<string, string>();
+  const seenKeys = new Set<string>();
+
+  for (const target of context.targets) {
+    const rawVal = titlesObj[target.noteId];
+    if (typeof rawVal !== 'string') {
+      return { ok: false, error: `Missing title for note ${target.noteId}` };
+    }
+    const clean = sanitizeLine(rawVal);
+    if (!clean) {
+      return { ok: false, error: `Empty title for note ${target.noteId}` };
+    }
+    if (DOC_EXTENSION_RE.test(clean) || isScannerStyleTitle(clean)) {
+      return { ok: false, error: `Title for note ${target.noteId} contains a file extension or scanner name` };
+    }
+    if (clean.length > maxChars + 20) {
+      return { ok: false, error: `Title for note ${target.noteId} exceeds length budget` };
+    }
+    const orig = sanitizeLine(target.currentSuggestion);
+    if (DATE_PREFIX_RE.test(orig) && !DATE_PREFIX_RE.test(clean)) {
+      return { ok: false, error: `Title for note ${target.noteId} lost YYYY-MM-DD date prefix` };
+    }
+    if (orig.includes('–') && !clean.includes('–') && !clean.includes(' - ')) {
+      return { ok: false, error: `Title for note ${target.noteId} lost en-dash format` };
+    }
+    const key = normalizeTitleKey(clean);
+    if (seenKeys.has(key)) {
+      return { ok: false, error: 'Disambiguated titles are not distinct' };
+    }
+    if (context.forbiddenKeys.has(key)) {
+      return { ok: false, error: `Title for note ${target.noteId} still collides with an existing note` };
+    }
+    seenKeys.add(key);
+    result.set(target.noteId, clean);
+  }
+
+  return { ok: true, titles: result };
 }
 
 function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -1187,9 +1430,165 @@ function extractDocumentDate(text: string): string | null {
   return null;
 }
 
+function parseTitleDetailFromSystemPrompt(systemPrompt: string): TitleDetail {
+  const match = /^Title detail level:\s*(short|standard|detailed)\b/im.exec(systemPrompt);
+  return match && isValidTitleDetail(match[1].toLowerCase())
+    ? (match[1].toLowerCase() as TitleDetail)
+    : 'short';
+}
+
+function periodRepeatsDate(period: string, datePrefix: string | null): boolean {
+  if (!datePrefix || !/^\d{4}-\d{2}-\d{2}$/.test(datePrefix)) return false;
+  const [year, month] = datePrefix.split('-');
+  const m = /^(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec)\s+(20\d{2}|19\d{2})$/i.exec(
+    period.trim()
+  );
+  if (!m) return false;
+  return MONTH_NAMES[m[1].toLowerCase()] === month && m[2] === year;
+}
+
+/** Extracts deterministic distinguishing details (last-4 digits, person, tax year/period, ref) from note text. */
+function extractDistinguishingDetails(text: string, datePrefix: string | null = null): string[] {
+  const details: string[] = [];
+  const seen = new Set<string>();
+  const add = (raw: string) => {
+    const clean = sanitizeLine(raw).replace(/[.,;:\s]+$/, '');
+    if (!clean) return;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    details.push(clean);
+  };
+
+  // 1. Card/account last 4 digits (never full account numbers)
+  const last4Labelled = /(?:card|account|acct|a\/c|ending(?:\s+in)?|last\s*4)[^\n\d]{0,20}(?:[*xX•…\-\s]*(\d{4}))\b/i.exec(text);
+  if (last4Labelled) {
+    add(`…${last4Labelled[1]}`);
+  } else {
+    const maskedLast4 = /(?:[•*xX]{2,}|…)[-\s]?(\d{4})\b/.exec(text);
+    if (maskedLast4) add(`…${maskedLast4[1]}`);
+  }
+
+  // 2. Person / taxpayer / cardholder
+  const personMatch = /(?:taxpayer|cardholder|account\s+holder|holder|member|patient|recipient|name)\s*:\s*([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)?)/i.exec(text);
+  if (personMatch) {
+    add(personMatch[1]);
+  }
+
+  // 3. Tax year / period / quarter (skip if it repeats the document date's month+year)
+  const periodMatch =
+    /(?:tax\s+year|billing\s+period|statement\s+period|period|quarter)\s*:?\s*(Q[1-4]\s+20\d{2}|20\d{2}[-/]\d{2}(?:\d{2})?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+20\d{2})/i.exec(
+      text
+    );
+  if (periodMatch && !periodRepeatsDate(periodMatch[1], datePrefix)) {
+    add(periodMatch[1]);
+  }
+
+  // 4. Short invoice / policy / reference number (truncate purely numeric >=6 digits to last 4)
+  const refMatch =
+    /(?:invoice|inv|policy|customer\s+reference|ref(?:erence)?|claim|order)\s*(?:#|no\.?|number|:)\s*#?([A-Za-z0-9][A-Za-z0-9-]{2,20})/i.exec(
+      text
+    );
+  if (refMatch) {
+    const val = refMatch[1];
+    add(/^\d{6,}$/.test(val) ? `…${val.slice(-4)}` : val);
+  }
+
+  // 5. Bill To / Attention party
+  const billToMatch = /(?:bill\s+to|attention|attn)\s*:\s*([A-Za-z0-9][A-Za-z0-9 .&'-]{1,28})/i.exec(text);
+  if (billToMatch) {
+    add(billToMatch[1]);
+  }
+
+  return details;
+}
+
+function applyFakeTitleDetail(baseTitle: string, details: string[], titleDetail: TitleDetail): string {
+  if (titleDetail === 'short' || details.length === 0) return baseTitle;
+  const baseLower = baseTitle.toLowerCase();
+  const fresh = details.filter((d) => !baseLower.includes(d.toLowerCase()));
+  if (fresh.length === 0) return baseTitle;
+  const maxItems = titleDetail === 'detailed' ? 3 : 1;
+  const suffix = fresh.slice(0, maxItems).join(', ');
+  return normalizeSuggestedTitle(`${baseTitle} – ${suffix}`, '', TITLE_MAX_CHARS[titleDetail]);
+}
+
+function handleFakeUniquenessPrompt(systemMsg: string, userMsg: string): LlmCompletionResult {
+  const titleDetail = parseTitleDetailFromSystemPrompt(systemMsg);
+  const usedKeys = new Set<string>();
+
+  for (const m of userMsg.matchAll(/^--- EXISTING NOTE ---\ntitle:\s*(.+)$/gm)) {
+    const key = normalizeTitleKey(m[1]);
+    if (key) usedKeys.add(key);
+  }
+  const takenSection = /Already used titles to avoid:\n([\s\S]*?)(?=\n\nNotes to give distinct titles:|$)/.exec(userMsg);
+  if (takenSection) {
+    for (const line of takenSection[1].split('\n')) {
+      const cleaned = line.replace(/^- /, '').trim();
+      const key = normalizeTitleKey(cleaned);
+      if (key) usedKeys.add(key);
+    }
+  }
+
+  const targetBlocks = userMsg.split(/\n--- NOTE [^\n]+ ---\n/).slice(1);
+  const titles: Record<string, string> = {};
+
+  for (let i = 0; i < targetBlocks.length; i++) {
+    const block = targetBlocks[i];
+    const idMatch = /^id:\s*(\S+)$/m.exec(block);
+    const createdMatch = /^createdDate:\s*(\d{4}-\d{2}-\d{2})$/m.exec(block);
+    const suggMatch = /^currentSuggestion:\s*(.+)$/m.exec(block);
+    const excerptMatch = /excerpt:\s*([\s\S]*)$/.exec(block);
+    const noteId = idMatch?.[1]?.trim();
+    if (!noteId) continue;
+
+    const createdDate = createdMatch?.[1] ?? '';
+    const baseSuggestion = sanitizeLine(suggMatch?.[1] ?? 'Untitled');
+    const excerpt = excerptMatch?.[1]?.trim() === '(empty)' ? '' : excerptMatch?.[1]?.trim() ?? '';
+    const datePrefix = /^\d{4}-\d{2}-\d{2}/.exec(baseSuggestion)?.[0] ?? (createdDate || null);
+    const details = extractDistinguishingDetails(excerpt, datePrefix);
+
+    const candidates: string[] = [];
+    for (const d of details) {
+      candidates.push(`${baseSuggestion} – ${d}`);
+    }
+    if (details.length >= 2) {
+      candidates.push(`${baseSuggestion} – ${details.slice(0, 2).join(' ')}`);
+      candidates.push(`${baseSuggestion} – ${details.slice(0, 3).join(', ')}`);
+    }
+    if (createdDate && !baseSuggestion.includes(createdDate)) {
+      candidates.push(`${baseSuggestion} – ${createdDate}`);
+    }
+    candidates.push(`${baseSuggestion} – Note ${i + 1}`);
+    candidates.push(`${baseSuggestion} – ${noteId.slice(0, 4)}`);
+
+    const maxChars = Math.max(TITLE_MAX_CHARS[titleDetail], 100);
+    let chosen = candidates[candidates.length - 1];
+    for (const rawCand of candidates) {
+      const cand = normalizeSuggestedTitle(rawCand, '', maxChars);
+      const key = normalizeTitleKey(cand);
+      if (key && !usedKeys.has(key)) {
+        chosen = cand;
+        break;
+      }
+    }
+    usedKeys.add(normalizeTitleKey(chosen));
+    titles[noteId] = chosen;
+  }
+
+  const content = JSON.stringify({ titles });
+  const promptTokens = Math.max(100, Math.round((systemMsg.length + userMsg.length) / 4));
+  const completionTokens = Math.max(25, Math.round(content.length / 4));
+  return {
+    content,
+    usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens },
+  };
+}
+
 /**
  * Deterministic fake organizer for demo and offline testing. Reads only the prompt messages so it
- * honors exclusions, OCR extraction, meaningful-title preservation, and token reporting end-to-end.
+ * honors exclusions, OCR extraction, meaningful-title preservation, title detail levels, uniqueness
+ * disambiguation, and token reporting end-to-end.
  */
 export function createFakeCompletionClient(
   delayMs = 0,
@@ -1202,6 +1601,12 @@ export function createFakeCompletionClient(
 
     const systemMsg = messages.find((m) => m.role === 'system')?.content ?? '';
     const userMsg = messages.find((m) => m.role === 'user')?.content ?? '';
+
+    if (systemMsg.startsWith(UNIQUENESS_SYSTEM_HEADER)) {
+      return handleFakeUniquenessPrompt(systemMsg, userMsg);
+    }
+
+    const titleDetail = parseTitleDetailFromSystemPrompt(systemMsg);
     const { allowed, existingTags } = parsePromptContext(systemMsg);
 
     const titleMatch = /^Current title:\s*(.+)$/m.exec(userMsg);
@@ -1223,14 +1628,38 @@ export function createFakeCompletionClient(
     const combinedLower = combined.toLowerCase();
     const documentDate = extractDocumentDate(`${ocrText}\n${bodyText}\n${currentTitle}`);
     const datePrefix = documentDate ?? createdDate;
+    const details = extractDistinguishingDetails(`${ocrText}\n${bodyText}`, datePrefix);
 
-    if (systemMsg === RETITLE_SYSTEM_INSTRUCTIONS) {
-      const firstMeaningfulLine = sanitizeLine((ocrText || bodyText).split('\n').find((line) => line.trim().length >= 3) ?? '');
-      const shortSubject = firstMeaningfulLine.slice(0, 48).replace(DOC_EXTENSION_RE, '').trim();
-      const title = isScannerStyleTitle(currentTitle) && shortSubject
-        ? `${datePrefix} ${shortSubject} – Document`
-        : currentTitle;
-      const suggestion = { title, confidence: ocrText ? 0.86 : 0.62, reason: ocrText ? 'Generated a concise title from attachment OCR.' : 'Kept the existing meaningful title.' };
+    if (systemMsg.startsWith(RETITLE_SYSTEM_HEADER)) {
+      let baseTitle: string;
+      let generated = true;
+      if (/acme cloud services|dedicated backup storage/i.test(combined)) {
+        baseTitle = `${datePrefix} Acme Cloud Services – Dedicated Backup Storage Invoice`;
+      } else if (/hmrc|self assessment|tax return/i.test(combined)) {
+        baseTitle = `${datePrefix} HMRC – Self Assessment Tax Return`;
+      } else if (/credit card statement/i.test(combined)) {
+        const issuerLine = sanitizeLine((ocrText || bodyText).split('\n').find((l) => l.trim().length >= 2) ?? 'Card Issuer');
+        const issuer = issuerLine.split(/\s+credit\s+card|\s+statement/i)[0].trim().slice(0, 32) || 'Card Issuer';
+        baseTitle = `${datePrefix} ${issuer} – Credit Card Statement`;
+      } else if (isScannerStyleTitle(currentTitle)) {
+        const firstMeaningfulLine = sanitizeLine((ocrText || bodyText).split('\n').find((line) => line.trim().length >= 3) ?? '');
+        const shortSubject = firstMeaningfulLine.slice(0, 48).replace(DOC_EXTENSION_RE, '').trim();
+        baseTitle = shortSubject ? `${datePrefix} ${shortSubject} – Document` : currentTitle;
+      } else {
+        baseTitle = currentTitle;
+        generated = DATE_PREFIX_RE.test(currentTitle);
+      }
+
+      const title = generated ? applyFakeTitleDetail(baseTitle, details, titleDetail) : baseTitle;
+      const suggestion = {
+        title,
+        confidence: ocrText || details.length > 0 ? 0.86 : 0.62,
+        reason: ocrText
+          ? `Generated a ${titleDetail} title from attachment OCR.`
+          : title !== currentTitle
+            ? `Generated a ${titleDetail} title from note content.`
+            : 'Kept the existing meaningful title.',
+      };
       const promptTokens = Math.max(80, Math.round((systemMsg.length + userMsg.length) / 4));
       const content = JSON.stringify(suggestion);
       const completionTokens = Math.max(20, Math.round(content.length / 4));
@@ -1268,16 +1697,41 @@ export function createFakeCompletionClient(
 
     if (/acme cloud services|dedicated backup storage/i.test(combined)) {
       suggestion = {
-        title: `${datePrefix} Acme Cloud Services – Dedicated Backup Storage Invoice`,
+        title: applyFakeTitleDetail(
+          `${datePrefix} Acme Cloud Services – Dedicated Backup Storage Invoice`,
+          details,
+          titleDetail
+        ),
         notebookId: pickNotebook([/invoice|finance|bill/i, /projects/i, /personal/i, /work/i]),
         tags: pickTags(['invoice', 'acme-cloud']),
         confidence: 0.94,
         documentDate,
         reason: 'Extracted issuer, invoice date, and backup storage renewal details from attachment OCR.',
       };
-    } else if (/electricity bill|utility|statement/i.test(combined)) {
+    } else if (/hmrc|self assessment|tax return/i.test(combined)) {
       suggestion = {
-        title: isScannerStyleTitle(currentTitle) ? `${datePrefix} Utility Provider – Electricity Bill` : currentTitle,
+        title: applyFakeTitleDetail(`${datePrefix} HMRC – Self Assessment Tax Return`, details, titleDetail),
+        notebookId: pickNotebook([/tax|finance|personal/i, /work|projects/i]),
+        tags: pickTags(['tax', 'hmrc']),
+        confidence: 0.92,
+        documentDate,
+        reason: 'Matched HMRC tax return details from note content.',
+      };
+    } else if (/credit card statement/i.test(combined)) {
+      const issuerLine = sanitizeLine((ocrText || bodyText).split('\n').find((l) => l.trim().length >= 2) ?? 'Card Issuer');
+      const issuer = issuerLine.split(/\s+credit\s+card|\s+statement/i)[0].trim().slice(0, 32) || 'Card Issuer';
+      suggestion = {
+        title: applyFakeTitleDetail(`${datePrefix} ${issuer} – Credit Card Statement`, details, titleDetail),
+        notebookId: pickNotebook([/bank|finance|bill|personal/i, /work|projects/i]),
+        tags: pickTags(['statement', normalizeOrganizeTag(issuer) || 'card']),
+        confidence: 0.91,
+        documentDate,
+        reason: 'Matched credit card statement details from note content.',
+      };
+    } else if (/electricity bill|utility|statement/i.test(combined)) {
+      const baseTitle = isScannerStyleTitle(currentTitle) ? `${datePrefix} Utility Provider – Electricity Bill` : currentTitle;
+      suggestion = {
+        title: isScannerStyleTitle(currentTitle) ? applyFakeTitleDetail(baseTitle, details, titleDetail) : currentTitle,
         notebookId: pickNotebook([/bill|finance|personal/i, /reading|work/i], false),
         tags: pickTags(['bill', existingTags.includes('important') ? 'important' : 'utility-provider']),
         confidence: 0.88,
@@ -1313,7 +1767,7 @@ export function createFakeCompletionClient(
           : [/projects|work|personal|reading/i];
 
       suggestion = {
-        title: `${datePrefix} ${shortSubject} – Document`,
+        title: applyFakeTitleDetail(`${datePrefix} ${shortSubject} – Document`, details, titleDetail),
         notebookId: pickNotebook(notebookPatterns),
         tags: pickTags([
           'other',
@@ -1635,7 +2089,10 @@ export class OrganizerService {
         (s): s is OrganizeJobSummary =>
           Boolean(s && typeof s.id === 'string' && SAFE_JOB_ID_RE.test(s.id) && typeof s.status === 'string')
       );
-      for (const summary of summaries) summary.mode = summary.mode === 'retitle' ? 'retitle' : 'organize';
+      for (const summary of summaries) {
+        summary.mode = summary.mode === 'retitle' ? 'retitle' : 'organize';
+        summary.titleDetail = isValidTitleDetail(summary.titleDetail) ? summary.titleDetail : 'short';
+      }
       sortSummariesNewestFirst(summaries);
       return summaries;
     } catch {
@@ -1961,6 +2418,8 @@ export class OrganizerService {
     if (input.mode !== undefined && input.mode !== 'organize' && input.mode !== 'retitle') {
       throw new OrganizeValidationError('mode must be organize or retitle');
     }
+    // Validate titleDetail on dryRun as well (ignored when counting)
+    parseTitleDetail(input.titleDetail);
     const entry = await noteCache.ensureFresh(sessionId, 'stale-ok');
     const ids = this.resolveStartNoteIds(entry, input, true);
     const matched = ids.filter((id) => {
@@ -1988,17 +2447,68 @@ export class OrganizerService {
       jobs: state.summaries.map((s) => ({
         ...s,
         mode: s.mode === 'retitle' ? 'retitle' : 'organize',
+        titleDetail: isValidTitleDetail(s.titleDetail) ? s.titleDetail : 'short',
         progress: { ...s.progress },
         usage: { ...s.usage },
       })),
     };
   }
 
+  private async buildNoteExcerpt(
+    entry: CacheEntry,
+    note: RawJoplinItem,
+    sessionId?: string,
+    maxChars = MAX_UNIQUENESS_EXCERPT_CHARS
+  ): Promise<string> {
+    const rawBody = stripLinksFromBody(note.body, markupLanguageOf(note.properties), maxChars);
+    const rawOcr = sessionId
+      ? await noteCache.getNoteAttachmentText(sessionId, note.id, { maxChars })
+      : noteCache.getAttachmentTextFromEntry(entry, note.id, { maxChars });
+    const ocrTrim = rawOcr.trim();
+    const bodyTrim = rawBody.trim();
+    if (!bodyTrim) return ocrTrim.slice(0, maxChars);
+    if (!ocrTrim) return bodyTrim.slice(0, maxChars);
+    const bodyBudget = Math.min(bodyTrim.length, Math.floor(maxChars * 0.45));
+    const bodyPart = bodyTrim.length > bodyBudget ? `${bodyTrim.slice(0, bodyBudget - 1).trimEnd()}…` : bodyTrim;
+    const ocrBudget = Math.max(0, maxChars - bodyPart.length - 1);
+    const ocrPart = ocrTrim.length > ocrBudget ? `${ocrTrim.slice(0, Math.max(0, ocrBudget - 1)).trimEnd()}…` : ocrTrim;
+    return ocrPart ? `${bodyPart}\n${ocrPart}` : bodyPart;
+  }
+
+  private collectActiveNotesByTitleKey(
+    entry: CacheEntry,
+    excludeNoteIds: ReadonlySet<string>
+  ): Map<string, RawJoplinItem[]> {
+    const map = new Map<string, RawJoplinItem[]>();
+    for (const note of entry.notes.values()) {
+      if (excludeNoteIds.has(note.id)) continue;
+      if (
+        note.deletedTime > 0 ||
+        isConflictNote(note) ||
+        note.properties.encryption_applied === '1' ||
+        (note.parentId && isNotebookTrashed(entry, note.parentId))
+      ) {
+        continue;
+      }
+      const key = normalizeTitleKey(note.title);
+      if (!key) continue;
+      const list = map.get(key) ?? [];
+      list.push(note);
+      map.set(key, list);
+    }
+    return map;
+  }
+
   /** Suggests a title for one editable note without creating a persisted job. */
-  public async suggestRetitle(sessionId: string, noteId: unknown): Promise<{ title: string }> {
+  public async suggestRetitle(
+    sessionId: string,
+    noteId: unknown,
+    rawTitleDetail?: unknown
+  ): Promise<{ title: string }> {
     if (!this.isEnabled()) throw new OrganizeValidationError('Auto-organize is not configured on this server', 503);
     if (typeof noteId !== 'string') throw new OrganizeValidationError('noteId is required');
     assertValidId(noteId, 'note id');
+    const titleDetail = parseTitleDetail(rawTitleDetail);
     const entry = await noteCache.ensureFresh(sessionId, 'stale-ok');
     const note = entry.notes.get(noteId);
     if (!note) throw new OrganizeValidationError(`Note not found: ${noteId}`, 404);
@@ -2018,7 +2528,7 @@ export class OrganizerService {
     }
     const ocrText = await noteCache.getNoteAttachmentText(sessionId, note.id, { maxChars: MAX_OCR_CHARS });
     const messages: LlmMessage[] = [
-      { role: 'system', content: RETITLE_SYSTEM_INSTRUCTIONS },
+      { role: 'system', content: buildRetitleSystemPrompt(titleDetail) },
       {
         role: 'user',
         content: buildRetitleUserPrompt({
@@ -2033,17 +2543,70 @@ export class OrganizerService {
     const completion = this.getCompletionClient();
     const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
     const first = await completion(messages, timeoutSignal);
-    let parsed = parseAndValidateRetitleSuggestion(first.content, { currentTitle: note.title });
+    let parsed = parseAndValidateRetitleSuggestion(first.content, { currentTitle: note.title, titleDetail });
     if (!parsed.ok) {
       const repair = await completion([
         ...messages,
         { role: 'assistant', content: first.content },
         { role: 'user', content: `Your previous response was invalid (${parsed.error}). Reply ONLY with { "title": string, "confidence": number, "reason": string }.` },
       ], timeoutSignal);
-      parsed = parseAndValidateRetitleSuggestion(repair.content, { currentTitle: note.title });
+      parsed = parseAndValidateRetitleSuggestion(repair.content, { currentTitle: note.title, titleDetail });
     }
     if (!parsed.ok) throw new OrganizeValidationError('Model returned invalid title suggestion', 502);
-    return { title: parsed.suggestion.title };
+
+    let suggestedTitle = parsed.suggestion.title;
+    const suggestedKey = normalizeTitleKey(suggestedTitle);
+    const othersByKey = this.collectActiveNotesByTitleKey(entry, new Set([note.id]));
+    const collidingOthers = suggestedKey ? othersByKey.get(suggestedKey) ?? [] : [];
+
+    if (collidingOthers.length > 0) {
+      try {
+        const existingNotes: UniquenessExistingNote[] = [];
+        for (const other of collidingOthers.slice(0, MAX_UNIQUENESS_CONTEXT_NOTES)) {
+          existingNotes.push({
+            createdDate: formatIsoDate(other.createdTime || other.updatedTime),
+            title: other.title,
+            excerpt: await this.buildNoteExcerpt(entry, other, sessionId),
+          });
+        }
+        const targetExcerpt = await this.buildNoteExcerpt(entry, note, sessionId);
+        const disambigMessages: LlmMessage[] = [
+          { role: 'system', content: buildUniquenessSystemPrompt(titleDetail) },
+          {
+            role: 'user',
+            content: buildUniquenessUserPrompt({
+              collidingTitle: suggestedTitle,
+              existingNotes,
+              targetNotes: [
+                {
+                  noteId: note.id,
+                  createdDate: formatIsoDate(note.createdTime || note.updatedTime),
+                  currentTitle: note.title,
+                  currentSuggestion: suggestedTitle,
+                  excerpt: targetExcerpt,
+                },
+              ],
+            }),
+          },
+        ];
+        const disambigResult = await completion(disambigMessages, AbortSignal.timeout(REQUEST_TIMEOUT_MS));
+        const validated = parseAndValidateUniquenessResponse(disambigResult.content, {
+          targets: [{ noteId: note.id, currentSuggestion: suggestedTitle }],
+          forbiddenKeys: new Set(othersByKey.keys()),
+          titleDetail,
+        });
+        if (validated.ok) {
+          const uniqueTitle = validated.titles.get(note.id);
+          if (uniqueTitle) {
+            suggestedTitle = uniqueTitle;
+          }
+        }
+      } catch {
+        // Keep the initial suggestion if disambiguation fails
+      }
+    }
+
+    return { title: suggestedTitle };
   }
 
   /**
@@ -2066,6 +2629,7 @@ export class OrganizerService {
       }
       mode = input.mode;
     }
+    const titleDetail = parseTitleDetail(input.titleDetail);
     if (input.includeSubNotebooks !== undefined && typeof input.includeSubNotebooks !== 'boolean') {
       throw new OrganizeValidationError('includeSubNotebooks must be a boolean');
     }
@@ -2111,8 +2675,8 @@ export class OrganizerService {
       );
     }
     const { systemPrompt, allowedNotebookIds, pathById } = mode === 'retitle'
-      ? { systemPrompt: RETITLE_SYSTEM_INSTRUCTIONS, allowedNotebookIds: [], pathById: buildNotebookPaths(entry).pathById }
-      : buildOrganizeSystemPrompt(entry, excludeSet);
+      ? { systemPrompt: buildRetitleSystemPrompt(titleDetail), allowedNotebookIds: [], pathById: buildNotebookPaths(entry).pathById }
+      : buildOrganizeSystemPrompt(entry, excludeSet, titleDetail);
 
     const items: InternalJobItem[] = uniqueNoteIds.map((noteId) => {
       const note = entry.notes.get(noteId);
@@ -2167,6 +2731,7 @@ export class OrganizerService {
     const job: InternalOrganizeJob = {
       id: randomUUID().replace(/-/g, ''),
       mode,
+      titleDetail,
       ownerKey,
       status: hasPending ? 'running' : 'done',
       excludeNotebookIds: [...excludeSet],
@@ -2229,6 +2794,16 @@ export class OrganizerService {
         this.activeIndexes.set(ownerKey, similarityIndex);
       }
       return similarityIndex;
+    };
+
+    const addUsage = (usage?: Partial<OrganizeUsage>) => {
+      if (!usage) return;
+      const p = typeof usage.promptTokens === 'number' ? usage.promptTokens : 0;
+      const c = typeof usage.completionTokens === 'number' ? usage.completionTokens : 0;
+      const t = typeof usage.totalTokens === 'number' ? usage.totalTokens : p + c;
+      job.usage.promptTokens += p;
+      job.usage.completionTokens += c;
+      job.usage.totalTokens += t;
     };
 
     let loopPromise: Promise<void> | undefined;
@@ -2342,25 +2917,16 @@ export class OrganizerService {
                 { role: 'user', content: userPrompt },
               ];
 
-              const addUsage = (usage?: Partial<OrganizeUsage>) => {
-                if (!usage) return;
-                const p = typeof usage.promptTokens === 'number' ? usage.promptTokens : 0;
-                const c = typeof usage.completionTokens === 'number' ? usage.completionTokens : 0;
-                const t = typeof usage.totalTokens === 'number' ? usage.totalTokens : p + c;
-                job.usage.promptTokens += p;
-                job.usage.completionTokens += c;
-                job.usage.totalTokens += t;
-              };
-
               const firstResult = await completionFn(messages, controller.signal);
               addUsage(firstResult.usage);
 
               let validation = job.mode === 'retitle'
-                ? parseAndValidateRetitleSuggestion(firstResult.content, { currentTitle: note.title })
+                ? parseAndValidateRetitleSuggestion(firstResult.content, { currentTitle: note.title, titleDetail: job.titleDetail })
                 : parseAndValidateSuggestion(firstResult.content, {
                     currentTitle: note.title,
                     currentNotebookId: note.parentId || '',
                     allowedNotebookIds: allowedSet,
+                    titleDetail: job.titleDetail,
                   });
 
               if (!validation.ok) {
@@ -2381,11 +2947,12 @@ export class OrganizerService {
                 const repairResult = await completionFn(repairMessages, controller.signal);
                 addUsage(repairResult.usage);
                 validation = job.mode === 'retitle'
-                  ? parseAndValidateRetitleSuggestion(repairResult.content, { currentTitle: note.title })
+                  ? parseAndValidateRetitleSuggestion(repairResult.content, { currentTitle: note.title, titleDetail: job.titleDetail })
                   : parseAndValidateSuggestion(repairResult.content, {
                       currentTitle: note.title,
                       currentNotebookId: note.parentId || '',
                       allowedNotebookIds: allowedSet,
+                      titleDetail: job.titleDetail,
                     });
               }
 
@@ -2396,6 +2963,8 @@ export class OrganizerService {
                 item.status = 'done';
                 delete item.error;
                 delete item.skipped;
+                delete item.titleMadeUnique;
+                delete item.titleCollision;
                 item.suggestion = validation.suggestion;
                 item.unchanged = job.mode === 'retitle' && validation.suggestion.title === sanitizeLine(note.title);
               }
@@ -2414,6 +2983,18 @@ export class OrganizerService {
         };
 
         await Promise.all(Array.from({ length: Math.min(concurrency, job.items.length) }, runOne));
+
+        if (!controller.signal.aborted && job.status === 'running') {
+          await this.runUniquenessPass({
+            ownerKey,
+            job,
+            completionFn,
+            signal: controller.signal,
+            addUsage,
+            initialSessionId,
+            initialEntry,
+          });
+        }
 
         if (!controller.signal.aborted && job.status === 'running') {
           job.status = 'done';
@@ -2441,6 +3022,161 @@ export class OrganizerService {
     })();
 
     this.activeLoops.set(ownerKey, loopPromise);
+  }
+
+  /**
+   * Disambiguates colliding suggested titles across the job's done unapplied items and against
+   * existing active notes (case/whitespace-insensitive). Never renames non-job notes.
+   */
+  private async runUniquenessPass(opts: {
+    ownerKey: string;
+    job: InternalOrganizeJob;
+    completionFn: LlmCompletionFn;
+    signal: AbortSignal;
+    addUsage: (usage?: Partial<OrganizeUsage>) => void;
+    initialSessionId?: string;
+    initialEntry?: CacheEntry;
+  }): Promise<void> {
+    const { ownerKey, job, completionFn, signal, addUsage, initialSessionId, initialEntry } = opts;
+    if (signal.aborted || job.status !== 'running') return;
+
+    const liveSessionId = this.activeSessions.get(ownerKey) ?? initialSessionId;
+    let entry: CacheEntry | null = null;
+    try {
+      entry = liveSessionId
+        ? await noteCache.ensureFresh(liveSessionId, 'stale-ok')
+        : initialEntry ?? noteCache.loadSavedEntryByOwnerKey(ownerKey);
+    } catch {
+      entry = initialEntry ?? noteCache.loadSavedEntryByOwnerKey(ownerKey);
+    }
+    if (signal.aborted || job.status !== 'running') return;
+
+    for (const item of job.items) {
+      delete item.titleCollision;
+    }
+
+    const candidateItems = job.items.filter((it) => it.status === 'done' && it.suggestion && !it.applied);
+    if (candidateItems.length === 0) return;
+
+    const candidateIds = new Set(candidateItems.map((it) => it.noteId));
+    const externalByKey = entry ? this.collectActiveNotesByTitleKey(entry, candidateIds) : new Map<string, RawJoplinItem[]>();
+
+    const groups = new Map<string, InternalJobItem[]>();
+    for (const item of candidateItems) {
+      const key = normalizeTitleKey(item.suggestion!.title);
+      if (!key) continue;
+      const list = groups.get(key) ?? [];
+      list.push(item);
+      groups.set(key, list);
+    }
+
+    const systemPrompt = buildUniquenessSystemPrompt(job.titleDetail);
+
+    for (const [key, group] of groups) {
+      if (signal.aborted || job.status !== 'running') return;
+      const collidingExternal = externalByKey.get(key) ?? [];
+      if (group.length < 2 && collidingExternal.length === 0) continue;
+
+      const existingNotes: UniquenessExistingNote[] = [];
+      if (entry && collidingExternal.length > 0) {
+        for (const ext of collidingExternal.slice(0, MAX_UNIQUENESS_CONTEXT_NOTES)) {
+          existingNotes.push({
+            createdDate: formatIsoDate(ext.createdTime || ext.updatedTime),
+            title: ext.title,
+            excerpt: await this.buildNoteExcerpt(entry, ext, liveSessionId),
+          });
+        }
+      }
+
+      const claimedKeys = new Set<string>();
+      if (collidingExternal.length > 0) {
+        claimedKeys.add(key);
+      }
+      const alreadyTakenTitles: string[] = [];
+
+      for (let offset = 0; offset < group.length; offset += MAX_UNIQUENESS_CHUNK_SIZE) {
+        if (signal.aborted || job.status !== 'running') return;
+        const chunk = group.slice(offset, offset + MAX_UNIQUENESS_CHUNK_SIZE);
+        const targetNotes: UniquenessTargetNote[] = [];
+        for (const item of chunk) {
+          const liveNote = entry?.notes.get(item.noteId);
+          const excerpt =
+            entry && liveNote ? await this.buildNoteExcerpt(entry, liveNote, liveSessionId) : '';
+          targetNotes.push({
+            noteId: item.noteId,
+            createdDate: formatIsoDate(liveNote?.createdTime || liveNote?.updatedTime || item.updatedTime),
+            currentTitle: liveNote?.title ?? item.currentTitle,
+            currentSuggestion: item.suggestion!.title,
+            excerpt,
+          });
+        }
+
+        const messages: LlmMessage[] = [
+          { role: 'system', content: systemPrompt },
+          {
+            role: 'user',
+            content: buildUniquenessUserPrompt({
+              collidingTitle: chunk[0].suggestion!.title,
+              targetNotes,
+              existingNotes,
+              alreadyTakenTitles,
+            }),
+          },
+        ];
+
+        try {
+          const result = await completionFn(messages, signal);
+          addUsage(result.usage);
+          if (signal.aborted || job.status !== 'running') return;
+
+          const validated = parseAndValidateUniquenessResponse(result.content, {
+            targets: chunk.map((it) => ({ noteId: it.noteId, currentSuggestion: it.suggestion!.title })),
+            forbiddenKeys: claimedKeys,
+            titleDetail: job.titleDetail,
+          });
+          if (validated.ok) {
+            for (const item of chunk) {
+              const nextTitle = validated.titles.get(item.noteId)!;
+              const prevTitle = item.suggestion!.title;
+              if (nextTitle !== prevTitle) {
+                item.suggestion!.title = nextTitle;
+                item.titleMadeUnique = true;
+                const liveNote = entry?.notes.get(item.noteId);
+                const baselineTitle = liveNote ? liveNote.title : item.currentTitle;
+                item.unchanged = job.mode === 'retitle' && nextTitle === sanitizeLine(baselineTitle);
+              }
+              claimedKeys.add(normalizeTitleKey(nextTitle));
+              alreadyTakenTitles.push(nextTitle);
+            }
+          }
+        } catch {
+          if (signal.aborted) return;
+          // Keep original titles on provider failure; final collision scan will flag remaining collisions.
+        }
+      }
+    }
+
+    // Recompute any remaining collisions across all active notes + job candidates.
+    const finalCounts = new Map<string, number>();
+    for (const [k, extList] of externalByKey) {
+      finalCounts.set(k, (finalCounts.get(k) ?? 0) + extList.length);
+    }
+    for (const item of candidateItems) {
+      const k = normalizeTitleKey(item.suggestion!.title);
+      if (k) finalCounts.set(k, (finalCounts.get(k) ?? 0) + 1);
+    }
+    for (const item of candidateItems) {
+      const k = normalizeTitleKey(item.suggestion!.title);
+      const otherCount = k ? Math.max(0, (finalCounts.get(k) ?? 0) - 1) : 0;
+      if (otherCount > 0) {
+        item.titleCollision = otherCount;
+      } else {
+        delete item.titleCollision;
+      }
+    }
+
+    job.updatedAt = Date.now();
+    this.scheduleSave(ownerKey, job.id);
   }
 
   /** Runs apply/undo for one job one at a time so their undo records can't overwrite each other. */
@@ -2598,6 +3334,7 @@ export class OrganizerService {
     return {
       id: job.id,
       mode: job.mode ?? 'organize',
+      titleDetail: isValidTitleDetail(job.titleDetail) ? job.titleDetail : 'short',
       status: job.status,
       ...(job.error ? { error: job.error } : {}),
       excludeNotebookIds: [...job.excludeNotebookIds],
@@ -2733,9 +3470,10 @@ export class OrganizerService {
 
     const entry = await noteCache.ensureFresh(sessionId, 'stale-ok');
     const excludeSet = new Set(job.excludeNotebookIds);
+    const jobTitleDetail: TitleDetail = isValidTitleDetail(job.titleDetail) ? job.titleDetail : 'short';
     const { systemPrompt, allowedNotebookIds, pathById } = job.mode === 'retitle'
-      ? { systemPrompt: RETITLE_SYSTEM_INSTRUCTIONS, allowedNotebookIds: [], pathById: buildNotebookPaths(entry).pathById }
-      : buildOrganizeSystemPrompt(entry, excludeSet);
+      ? { systemPrompt: buildRetitleSystemPrompt(jobTitleDetail), allowedNotebookIds: [], pathById: buildNotebookPaths(entry).pathById }
+      : buildOrganizeSystemPrompt(entry, excludeSet, jobTitleDetail);
 
     const retryTargets: Array<{ item: InternalJobItem; liveNote: RawJoplinItem }> = [];
     const liveSkipUpdates: Array<{ item: InternalJobItem; reason: string }> = [];

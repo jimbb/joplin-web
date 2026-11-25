@@ -11,8 +11,9 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { flattenNotebooks } from "@/lib/notebooks";
-import { Notebook, OrganizeJobSummary } from "@/lib/types";
+import { Notebook, OrganizeJobSummary, TitleDetail } from "@/lib/types";
 import type { OrganizeJobMode } from "@/lib/types";
+import { TitleDetailControl, useTitleDetail } from "./TitleDetailControl";
 
 interface StartOrganizeDialogProps {
   open: boolean;
@@ -28,8 +29,8 @@ interface StartOrganizeDialogProps {
   conflictRunningJobId?: string | null;
   conflictMessage?: string | null;
   onViewRunningJob?: (jobId: string) => void;
-  onCancelAndStart?: (runningJobId: string, excludeNotebookIds: string[]) => void;
-  onConfirm: (excludeNotebookIds: string[]) => void;
+  onCancelAndStart?: (runningJobId: string, excludeNotebookIds: string[], titleDetail: TitleDetail) => void;
+  onConfirm: (excludeNotebookIds: string[], titleDetail: TitleDetail) => void;
   mode?: OrganizeJobMode;
 }
 
@@ -59,6 +60,7 @@ export function StartOrganizeDialog({
     defaultExcludedNotebookId ? new Set([defaultExcludedNotebookId]) : new Set()
   );
   const [filter, setFilter] = useState("");
+  const [titleDetail, setTitleDetail] = useTitleDetail();
 
   // Reset defaults whenever the dialog opens (adjusted during render, matching PromptDialog)
   const [synced, setSynced] = useState({ open, defaultExcludedNotebookId });
@@ -212,6 +214,8 @@ export function StartOrganizeDialog({
             </div>}
           </div>}
 
+          <TitleDetailControl value={titleDetail} onChange={setTitleDetail} disabled={isPending} />
+
           <div
             role="note"
             className="flex items-start gap-2.5 rounded-lg border border-border bg-muted/40 p-3 text-xs text-muted-foreground leading-relaxed"
@@ -234,7 +238,7 @@ export function StartOrganizeDialog({
               type="button"
               variant="destructive"
               disabled={isPending || selectedCount === 0}
-              onClick={() => onCancelAndStart(effectiveRunningJobId, [...excludedIds])}
+              onClick={() => onCancelAndStart(effectiveRunningJobId, [...excludedIds], titleDetail)}
               className="gap-1.5"
             >
               {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
@@ -244,7 +248,7 @@ export function StartOrganizeDialog({
             <Button
               type="button"
               disabled={isPending || selectedCount === 0}
-              onClick={() => onConfirm([...excludedIds])}
+              onClick={() => onConfirm([...excludedIds], titleDetail)}
               className="gap-1.5"
             >
               {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}

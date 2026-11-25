@@ -3,7 +3,8 @@ import { Folder, Loader2, Sparkles } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { flattenNotebooks } from "@/lib/notebooks";
-import { Notebook, OrganizeJobMode } from "@/lib/types";
+import { Notebook, OrganizeJobMode, TitleDetail } from "@/lib/types";
+import { TitleDetailControl, useTitleDetail } from "./TitleDetailControl";
 
 interface NewOrganizeJobDialogProps {
   open: boolean;
@@ -11,15 +12,21 @@ interface NewOrganizeJobDialogProps {
   notebooks: Notebook[];
   isPending?: boolean;
   matched?: number;
-  onConfirm: (input: { sourceNotebookIds?: string[]; mode: OrganizeJobMode; includeSubNotebooks: boolean }) => void | Promise<void>;
+  onConfirm: (input: {
+    sourceNotebookIds?: string[];
+    mode: OrganizeJobMode;
+    includeSubNotebooks: boolean;
+    titleDetail: TitleDetail;
+  }) => void | Promise<void>;
 }
 
-/** Picks a source scope and AI mode before the disclosure/exclusion confirmation. */
+/** Picks a source scope, AI mode, and title detail level before the disclosure/exclusion confirmation. */
 export function NewOrganizeJobDialog({ open, onOpenChange, notebooks, isPending = false, matched, onConfirm }: NewOrganizeJobDialogProps) {
   const [sourceIds, setSourceIds] = useState<Set<string>>(new Set());
   const [allNotes, setAllNotes] = useState(true);
   const [includeSubNotebooks, setIncludeSubNotebooks] = useState(true);
   const [mode, setMode] = useState<OrganizeJobMode>("organize");
+  const [titleDetail, setTitleDetail] = useTitleDetail();
   const flat = useMemo(() => flattenNotebooks(notebooks).filter((nb) => !nb.encrypted), [notebooks]);
   const noteCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -32,7 +39,7 @@ export function NewOrganizeJobDialog({ open, onOpenChange, notebooks, isPending 
   }, [notebooks]);
   const toggle = (id: string) => setSourceIds((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
   const selectAll = () => { setAllNotes(true); setSourceIds(new Set()); };
-  const submit = () => onConfirm({ sourceNotebookIds: allNotes ? [] : [...sourceIds], mode, includeSubNotebooks });
+  const submit = () => onConfirm({ sourceNotebookIds: allNotes ? [] : [...sourceIds], mode, includeSubNotebooks, titleDetail });
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
@@ -63,6 +70,7 @@ export function NewOrganizeJobDialog({ open, onOpenChange, notebooks, isPending 
             <label className="flex items-center gap-2 text-sm"><input type="radio" checked={mode === "organize"} onChange={() => setMode("organize")} /> Organize (title, notebook, tags)</label>
             <label className="flex items-center gap-2 text-sm"><input type="radio" checked={mode === "retitle"} onChange={() => setMode("retitle")} /> Retitle only</label>
           </div>
+          <TitleDetailControl value={titleDetail} onChange={setTitleDetail} disabled={isPending} />
         </div>
         <DialogFooter>
           <Button type="button" variant="ghost" disabled={isPending} onClick={() => onOpenChange(false)}>Cancel</Button>

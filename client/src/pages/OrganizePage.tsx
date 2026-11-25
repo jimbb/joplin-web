@@ -25,6 +25,7 @@ import { NotebookPicker } from "@/components/notebooks/NotebookPicker";
 import { TagAutocompleteInput } from "@/components/tags/TagAutocompleteInput";
 import { NewOrganizeJobDialog } from "@/components/organize/NewOrganizeJobDialog";
 import { StartOrganizeDialog } from "@/components/organize/StartOrganizeDialog";
+import { TITLE_DETAIL_LABELS } from "@/components/organize/TitleDetailControl";
 import { ConfirmDialog } from "@/components/common/Dialogs";
 import { QueryError } from "@/components/common/QueryError";
 import { Badge } from "@/components/ui/badge";
@@ -61,6 +62,7 @@ import {
   OrganizeJobItem,
   OrganizeJobSummary,
   OrganizeUndoResponse,
+  TitleDetail,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -85,6 +87,7 @@ interface NewJobScope {
   sourceNotebookIds: string[];
   includeSubNotebooks: boolean;
   mode: "organize" | "retitle";
+  titleDetail: TitleDetail;
   matched: number;
 }
 
@@ -166,10 +169,20 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
   const undoMutation = useUndoOrganizeJob(jobId);
   const isMutating = isPreparingApply || applyMutation.isPending || undoMutation.isPending;
 
-  const previewNewJob = async (input: { sourceNotebookIds?: string[]; mode: "organize" | "retitle"; includeSubNotebooks: boolean }) => {
+  const previewNewJob = async (input: {
+    sourceNotebookIds?: string[];
+    mode: "organize" | "retitle";
+    includeSubNotebooks: boolean;
+    titleDetail: TitleDetail;
+  }) => {
     try {
       const sourceNotebookIds = input.sourceNotebookIds ?? [];
-      const result = await previewOrganizeJob({ sourceNotebookIds, includeSubNotebooks: input.includeSubNotebooks, mode: input.mode });
+      const result = await previewOrganizeJob({
+        sourceNotebookIds,
+        includeSubNotebooks: input.includeSubNotebooks,
+        mode: input.mode,
+        titleDetail: input.titleDetail,
+      });
       setNewJobOpen(false);
       setNewJobConflict(null);
       setNewJobScope({ ...input, sourceNotebookIds, matched: result.matched });
@@ -178,13 +191,14 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
     }
   };
 
-  const startNewJob = async (excludeNotebookIds: string[]) => {
+  const startNewJob = async (excludeNotebookIds: string[], titleDetail?: TitleDetail) => {
     if (!newJobScope) return;
     try {
       const result = await createMutation.mutateAsync({
         sourceNotebookIds: newJobScope.sourceNotebookIds,
         includeSubNotebooks: newJobScope.includeSubNotebooks,
         mode: newJobScope.mode,
+        titleDetail: titleDetail ?? newJobScope.titleDetail,
         ...(newJobScope.mode === "organize" ? { excludeNotebookIds } : {}),
       });
       setNewJobScope(null);
@@ -200,10 +214,14 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
     }
   };
 
-  const cancelAndStartNewJob = async (runningJobId: string, excludeNotebookIds: string[]) => {
+  const cancelAndStartNewJob = async (
+    runningJobId: string,
+    excludeNotebookIds: string[],
+    titleDetail?: TitleDetail
+  ) => {
     await cancelRunningMutation.mutateAsync(runningJobId);
     setNewJobConflict(null);
-    await startNewJob(excludeNotebookIds);
+    await startNewJob(excludeNotebookIds, titleDetail);
   };
 
   const notebookPathById = useMemo(() => buildNotebookPathMap(notebooks), [notebooks]);
@@ -838,6 +856,31 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
     return null;
   };
 
+  const renderTitleStatusBadges = (item: OrganizeJobItem) => {
+    const hasCollision = typeof item.titleCollision === "number" && item.titleCollision > 0;
+    if (!item.titleMadeUnique && !hasCollision) return null;
+    return (
+      <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+        {item.titleMadeUnique && (
+          <Badge variant="outline" className="text-[10px] border-primary/40 bg-primary/10 text-primary gap-0.5">
+            <Sparkles className="h-2.5 w-2.5" aria-hidden="true" />
+            Made unique
+          </Badge>
+        )}
+        {hasCollision && (
+          <Badge
+            variant="outline"
+            role="status"
+            className="text-[10px] border-warning/40 bg-warning/10 text-warning gap-0.5"
+          >
+            <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
+            Same title as {item.titleCollision} other {item.titleCollision === 1 ? "note" : "notes"}
+          </Badge>
+        )}
+      </div>
+    );
+  };
+
   const renderNotebookSelector = (item: OrganizeJobItem) => {
     const { notebookId } = effectiveRow(item);
     const label = targetNotebookDisplay(notebookId, item.currentNotebookPath);
@@ -1086,6 +1129,9 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                               {summary.status}
                             </Badge>
                             <Badge variant="outline" className="text-[11px]">{summary.mode === "retitle" ? "Retitle only" : "Organize"}</Badge>
+                            <Badge variant="outline" className="text-[11px]">
+                              {TITLE_DETAIL_LABELS[summary.titleDetail ?? "short"]} titles
+                            </Badge>
                             {summary.createdAt > 0 && (
                               <span className="text-xs text-muted-foreground">
                                 {formatRelativeTime(summary.createdAt)}
@@ -1201,8 +1247,10 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
               setNewJobScope(null);
               navigate(`/organize/${runningJobId}`);
             }}
-            onCancelAndStart={(runningJobId, excludeNotebookIds) => void cancelAndStartNewJob(runningJobId, excludeNotebookIds)}
-            onConfirm={(excludeNotebookIds) => void startNewJob(excludeNotebookIds)}
+            onCancelAndStart={(runningJobId, excludeNotebookIds, titleDetail) =>
+              void cancelAndStartNewJob(runningJobId, excludeNotebookIds, titleDetail)
+            }
+            onConfirm={(excludeNotebookIds, titleDetail) => void startNewJob(excludeNotebookIds, titleDetail)}
           />
         </div>
       ) : (
@@ -1244,18 +1292,23 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                 <h1 className="text-base sm:text-lg font-bold text-foreground truncate">Auto-organize</h1>
               </div>
               {job && (
-                <Badge
-                  variant="outline"
-                  className={cn(
-                    "text-[11px] capitalize",
-                    job.status === "running" && "border-primary/40 bg-primary/10 text-primary",
-                    job.status === "done" && "border-success/35 bg-success/10 text-success",
-                    job.status === "cancelled" && "border-warning/40 bg-warning/10 text-warning",
-                    job.status === "failed" && "border-destructive/40 bg-destructive/10 text-destructive"
-                  )}
-                >
-                  {job.status}
-                </Badge>
+                <>
+                  <Badge
+                    variant="outline"
+                    className={cn(
+                      "text-[11px] capitalize",
+                      job.status === "running" && "border-primary/40 bg-primary/10 text-primary",
+                      job.status === "done" && "border-success/35 bg-success/10 text-success",
+                      job.status === "cancelled" && "border-warning/40 bg-warning/10 text-warning",
+                      job.status === "failed" && "border-destructive/40 bg-destructive/10 text-destructive"
+                    )}
+                  >
+                    {job.status}
+                  </Badge>
+                  <Badge variant="outline" className="text-[11px] whitespace-nowrap shrink-0">
+                    {TITLE_DETAIL_LABELS[job.titleDetail ?? "short"]} titles
+                  </Badge>
+                </>
               )}
             </div>
 
@@ -1502,10 +1555,10 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                       <th className="w-10 px-2.5 py-2.5 text-center">
                         <span className="sr-only">Select</span>
                       </th>
-                      <th className="w-[30%] px-3 py-2.5">Title</th>
+                      <th className={cn("px-3 py-2.5", isRetitle ? "w-[66%]" : "w-[30%]")}>Title</th>
                       {!isRetitle && <th className="w-[23%] px-3 py-2.5">Notebook</th>}
                       {!isRetitle && <th className="w-[21%] px-3 py-2.5">Tags</th>}
-                      <th className="w-[22%] px-3 py-2.5">Confidence &amp; reason</th>
+                      <th className={cn("px-3 py-2.5", isRetitle ? "w-[30%]" : "w-[22%]")}>Confidence &amp; reason</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border">
@@ -1550,13 +1603,16 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                               </Link>
                             </div>
                             {item.status === "done" ? (
-                              <Input
-                                value={suggestedTitle}
-                                disabled={isMutating}
-                                aria-label={`Suggested title for ${item.currentTitle || item.noteId}`}
-                                onChange={(e) => updateRowEdit(item.noteId, { title: e.target.value })}
-                                className="h-8 text-xs font-medium"
-                              />
+                              <>
+                                <Input
+                                  value={suggestedTitle}
+                                  disabled={isMutating}
+                                  aria-label={`Suggested title for ${item.currentTitle || item.noteId}`}
+                                  onChange={(e) => updateRowEdit(item.noteId, { title: e.target.value })}
+                                  className="h-8 text-xs font-medium"
+                                />
+                                {renderTitleStatusBadges(item)}
+                              </>
                             ) : item.status === "failed" ? (
                               <p className={cn("text-xs", item.skipped ? "text-muted-foreground" : "text-destructive")}>
                                 {item.error || "Analysis failed"}
@@ -1681,6 +1737,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                               onChange={(e) => updateRowEdit(item.noteId, { title: e.target.value })}
                               className="h-8 text-xs font-medium"
                             />
+                            {renderTitleStatusBadges(item)}
                           </div>
 
                           {!isRetitle && <div className="space-y-1">

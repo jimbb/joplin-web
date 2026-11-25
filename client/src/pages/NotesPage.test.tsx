@@ -522,6 +522,7 @@ describe("bulk selection and actions", () => {
     expect(post.body).toEqual({
       noteIds: [notes[0].id, notes[1].id],
       excludeNotebookIds: [work.id],
+      titleDetail: "standard",
     });
   });
 
@@ -604,5 +605,51 @@ describe("bulk selection and actions", () => {
     await waitFor(() => expect(location()).toBe(`/organize/${newId}`));
     expect(calls.some((c) => c.method === "DELETE" && c.path === `/api/organize/jobs/${runningId}`)).toBe(true);
     expect(calls.filter((c) => c.method === "POST" && c.path === "/api/organize/jobs")).toHaveLength(2);
+  });
+
+  it("shows Title length control in bulk bar next to Auto-retitle and sends remembered level", async () => {
+    localStorage.clear();
+    const calls = mockNotesApi((call) => {
+      if (call.path === "/api/organize/status") {
+        return jsonResponse({ enabled: true, model: "deepseek-flash" });
+      }
+      if (call.method === "POST" && call.path === "/api/organize/jobs") {
+        return jsonResponse({ jobId: "ret1234567890abcdef1234567890abc" }, 201);
+      }
+      return undefined;
+    });
+
+    renderWithProviders(
+      <>
+        <Routes>
+          <Route path="/notebooks/:id" element={<NotesPage />} />
+          <Route path="/notebooks/:notebookId/notes/:id" element={<NotesPage />} />
+          <Route path="/organize/:jobId" element={<div>Organize View</div>} />
+        </Routes>
+        <LocationProbe />
+      </>,
+      { route: `/notebooks/${work.id}` }
+    );
+    await noteRow("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Select" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select all (2)" }));
+
+    const bar = screen.getByRole("region", { name: "Bulk actions" });
+    expect(within(bar).getByRole("group", { name: "Title length" })).toBeTruthy();
+    fireEvent.click(within(bar).getByRole("button", { name: "Detailed" }));
+
+    fireEvent.click(within(bar).getByRole("button", { name: "Auto-retitle" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("button", { name: "Detailed" }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start retitling (2)" }));
+
+    await waitFor(() => expect(location()).toBe("/organize/ret1234567890abcdef1234567890abc"));
+    const post = calls.find((c) => c.method === "POST" && c.path === "/api/organize/jobs")!;
+    expect(post.body).toEqual({
+      noteIds: [notes[0].id, notes[1].id],
+      excludeNotebookIds: [work.id],
+      mode: "retitle",
+      titleDetail: "detailed",
+    });
   });
 });

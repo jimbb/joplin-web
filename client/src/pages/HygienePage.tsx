@@ -22,6 +22,7 @@ import { AppLayout } from "@/components/layout/AppLayout";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { QueryError } from "@/components/common/QueryError";
 import { DuplicateCompareDialog } from "@/components/hygiene/DuplicateCompareDialog";
+import { loadTitleDetail } from "@/components/organize/TitleDetailControl";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -362,6 +363,7 @@ export function HygienePage() {
     try {
       const { jobId } = await createOrganizeJob.mutateAsync({
         noteIds: untagged.map((n) => n.id),
+        titleDetail: loadTitleDetail(),
       });
       navigate(`/organize/${jobId}`);
     } catch (err) {

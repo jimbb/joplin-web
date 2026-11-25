@@ -48,6 +48,7 @@ import { NoteSelection, SelectionModifiers, useNoteSelection } from "@/hooks/use
 import { BulkUpdateProgress } from "@/hooks/use-mutations";
 import { useSearch } from "@/hooks/use-search";
 import { useTags } from "@/hooks/use-tags";
+import { TitleDetailControl, useTitleDetail } from "@/components/organize/TitleDetailControl";
 
 export const NOTE_LIST_PAGE_SIZE = 100;
 
@@ -210,6 +211,7 @@ export function NoteList({
   const [moveFilter, setMoveFilter] = useState("");
   const [tagOpen, setTagOpen] = useState(false);
   const [tagValue, setTagValue] = useState("");
+  const [titleDetail, setTitleDetail] = useTitleDetail();
 
   const { data: fetchedTags } = useTags(tagsProp === undefined && viewMode === "board");
   // The filter also keeps notes the full-text search finds (body and attachment OCR), not just
@@ -1145,6 +1147,16 @@ export function NoteList({
               Move to trash
             </Button>
           </div>
+
+          {canAutoOrganize && onAutoRetitle && (
+            <TitleDetailControl
+              value={titleDetail}
+              onChange={setTitleDetail}
+              disabled={isBulkPending}
+              compact
+              className="mt-2 pt-2 border-t border-border/60"
+            />
+          )}
         </div>
       )}
     </div>

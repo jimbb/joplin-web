@@ -124,10 +124,12 @@ export function createOrganizeRouter(service: OrganizerService = organizerServic
     res.status(200).json(report);
   });
 
-  /** POST /api/organize/retitle { noteId } */
+  /** POST /api/organize/retitle { noteId, titleDetail? } */
   router.post('/retitle', async (req, res) => {
-    const noteId = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body.noteId : undefined;
-    const result = await service.suggestRetitle(req.sessionId!, noteId);
+    const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+      ? (req.body as { noteId?: unknown; titleDetail?: unknown })
+      : {};
+    const result = await service.suggestRetitle(req.sessionId!, body.noteId, body.titleDetail);
     res.status(200).json(result);
   });
 
@@ -292,15 +294,16 @@ export function createOrganizeRouter(service: OrganizerService = organizerServic
       res.status(400).json({ error: 'Request body must be a JSON object' });
       return;
     }
-    const { noteIds, sourceNotebookIds, includeSubNotebooks, excludeNotebookIds, mode, dryRun } = req.body as {
+    const { noteIds, sourceNotebookIds, includeSubNotebooks, excludeNotebookIds, mode, titleDetail, dryRun } = req.body as {
       noteIds?: unknown;
       sourceNotebookIds?: unknown;
       includeSubNotebooks?: unknown;
       excludeNotebookIds?: unknown;
       mode?: unknown;
+      titleDetail?: unknown;
       dryRun?: unknown;
     };
-    const input = { noteIds, sourceNotebookIds, includeSubNotebooks, excludeNotebookIds, mode };
+    const input = { noteIds, sourceNotebookIds, includeSubNotebooks, excludeNotebookIds, mode, titleDetail };
     if (dryRun === true) {
       res.status(200).json(await service.countJob(req.sessionId!, input));
       return;

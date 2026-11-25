@@ -126,4 +126,30 @@ describe("NoteEditor title suggestions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByText("Suggested title")).toBeNull();
   });
+
+  it("lets the user pick title length from the Suggest title menu, remembers it, and sends it in requests", async () => {
+    aiEnabled = true;
+    renderEditor();
+
+    // Default level sent is standard
+    fireEvent.click(await screen.findByRole("button", { name: "Suggest title" }));
+    await screen.findByText("2025-01-01 Acme – Invoice");
+    const firstRetitle = calls.find((c) => c.method === "POST" && c.path === "/api/organize/retitle");
+    expect(firstRetitle?.body).toEqual({ noteId: NOTE_ID, titleDetail: "standard" });
+
+    // Open the Title length dropdown menu and pick Detailed
+    const menuTrigger = screen.getByRole("button", { name: "Title length" });
+    fireEvent.pointerDown(menuTrigger, { button: 0, ctrlKey: false });
+    const detailedItem = await screen.findByRole("menuitemradio", { name: /Detailed/ });
+    fireEvent.click(detailedItem);
+    expect(localStorage.getItem("joplin-organize-title-detail")).toBe("detailed");
+
+    // Next click sends detailed
+    fireEvent.click(screen.getByRole("button", { name: "Suggest title" }));
+    await waitFor(() => {
+      const retitleCalls = calls.filter((c) => c.method === "POST" && c.path === "/api/organize/retitle");
+      expect(retitleCalls).toHaveLength(2);
+      expect(retitleCalls[1].body).toEqual({ noteId: NOTE_ID, titleDetail: "detailed" });
+    });
+  });
 });

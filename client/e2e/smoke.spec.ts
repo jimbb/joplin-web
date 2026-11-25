@@ -196,10 +196,15 @@ test("selects multiple notes, runs Auto-organize, applies and undoes", async ({ 
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText("Auto-organize 2 notes")).toBeVisible();
   await expect(dialog.getByRole("checkbox", { name: /Work/ })).toBeChecked();
+  await expect(dialog.getByRole("group", { name: "Title length" }).getByRole("button", { name: "Standard" })).toHaveAttribute(
+    "aria-pressed",
+    "true"
+  );
   await expect(dialog.getByRole("note")).toContainText("OCR text");
   await dialog.getByRole("button", { name: "Start organizing (2)" }).click();
 
   await expect(page).toHaveURL(/\/organize\/[0-9a-f]+$/);
+  await expect(page.getByText("Standard titles")).toBeVisible();
   await expect(page.getByText("Analysed 2 / 2")).toBeVisible();
   await expect(page.getByRole("button", { name: "Very high (>= 0.85) (1)" })).toBeVisible();
 
@@ -208,7 +213,7 @@ test("selects multiple notes, runs Auto-organize, applies and undoes", async ({ 
   await page.getByRole("button", { name: "Select all high-confidence" }).click();
   await expect(page.getByRole("checkbox", { name: "Select 2024_03_11.pdf" })).toBeChecked();
   await expect(page.getByLabel("Suggested title for 2024_03_11.pdf")).toHaveValue(
-    "2024-03-11 Acme Cloud Services – Dedicated Backup Storage Invoice"
+    "2024-03-11 Acme Cloud Services – Dedicated Backup Storage Invoice – INV-2024-0311"
   );
   await expect(page.getByRole("checkbox", { name: "Select Markdown Extras: Math, Diagrams & More" })).not.toBeChecked();
 
@@ -229,6 +234,18 @@ test("selects multiple notes, runs Auto-organize, applies and undoes", async ({ 
 
   await sidebar.getByRole("button", { name: /^Work\s*, 2 notes$/ }).click();
   await expect(page.getByText("2024_03_11.pdf").first()).toBeVisible();
+
+  // Editor Suggest title menu picks Detailed and remembers it
+  await page.getByRole("heading", { level: 3, name: "2024_03_11.pdf", exact: true }).click();
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await page.getByRole("button", { name: "Title length" }).click();
+  await page.getByRole("menuitemradio", { name: /Detailed/ }).click();
+  await page.getByRole("button", { name: "Suggest title" }).click();
+  await expect(
+    page.getByText("2024-03-11 Acme Cloud Services – Dedicated Backup Storage Invoice – INV-2024-0311, Studio North Design")
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Dismiss" }).click();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
 });
 
 test("finds a note via its attachment OCR text", async ({ page }) => {

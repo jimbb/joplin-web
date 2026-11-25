@@ -14,6 +14,7 @@ import type {
   buildNoteSimilarityIndex as BuildNoteSimilarityIndexFn,
   buildOrganizeSystemPrompt as BuildOrganizeSystemPromptFn,
   buildOrganizeUserPrompt as BuildOrganizeUserPromptFn,
+  buildRetitleSystemPrompt as BuildRetitleSystemPromptFn,
   isScannerStyleTitle as IsScannerStyleTitleFn,
   MAX_EXCLUDED_NOTEBOOKS as MaxExcludedNotebooksConst,
   MAX_ORGANIZE_NOTES as MaxOrganizeNotesConst,
@@ -40,6 +41,7 @@ let createOrganizeRouter: typeof CreateOrganizeRouterFn;
 let buildNoteSimilarityIndex: typeof BuildNoteSimilarityIndexFn;
 let buildOrganizeSystemPrompt: typeof BuildOrganizeSystemPromptFn;
 let buildOrganizeUserPrompt: typeof BuildOrganizeUserPromptFn;
+let buildRetitleSystemPrompt: typeof BuildRetitleSystemPromptFn;
 let isScannerStyleTitle: typeof IsScannerStyleTitleFn;
 let MAX_EXCLUDED_NOTEBOOKS: typeof MaxExcludedNotebooksConst;
 let MAX_ORGANIZE_NOTES: typeof MaxOrganizeNotesConst;
@@ -79,6 +81,7 @@ before(async () => {
     buildNoteSimilarityIndex,
     buildOrganizeSystemPrompt,
     buildOrganizeUserPrompt,
+    buildRetitleSystemPrompt,
     isScannerStyleTitle,
     MAX_EXCLUDED_NOTEBOOKS,
     MAX_ORGANIZE_NOTES,
@@ -709,13 +712,17 @@ describe('OrganizerService: OpenAI HTTP client, retries, repairs, persistence an
           return;
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
+        const userText = String(body?.messages?.[1]?.content ?? '');
+        const mockTitle = userText.includes('Markdown Extras')
+          ? 'Markdown Extras: Math, Diagrams & More'
+          : '2024-03-11 Acme Cloud – Invoice';
         res.end(
           JSON.stringify({
             choices: [
               {
                 message: {
                   content: JSON.stringify({
-                    title: '2024-03-11 Acme Cloud – Invoice',
+                    title: mockTitle,
                     notebookId: demoId('nb-projects'),
                     tags: ['important', 'invoice'],
                     confidence: 0.92,
@@ -901,7 +908,10 @@ describe('OrganizerService: OpenAI HTTP client, retries, repairs, persistence an
             }
             return {
               content: JSON.stringify({
-                title: '2025-03-10 HSBC – Current Account Statement',
+                title:
+                  callIdx === 1
+                    ? '2025-03-10 HSBC – Current Account Statement'
+                    : 'Markdown Extras: Math, Diagrams & More',
                 notebookId: demoId('nb-personal'),
                 tags: ['statement', 'hsbc'],
                 confidence: 0.94,
@@ -1178,7 +1188,11 @@ describe('HTTP /api/organize endpoints: lifecycle, cancel, apply with conflict, 
     assert.equal(job.progress.done, 3);
     assert.ok(job.usage.totalTokens > 0);
     assert.equal(job.items[0].noteId, demoId('note-scanned-invoice'));
-    assert.equal(job.items[0].suggestion.title, '2024-03-11 Acme Cloud Services – Dedicated Backup Storage Invoice');
+    assert.equal(job.titleDetail, 'standard');
+    assert.equal(
+      job.items[0].suggestion.title,
+      '2024-03-11 Acme Cloud Services – Dedicated Backup Storage Invoice – INV-2024-0311'
+    );
     assert.notEqual(job.items[0].suggestion.notebookId, demoId('nb-work'));
     assert.ok(job.items[0].suggestion.confidence >= 0.7);
     assert.equal(job.items[1].suggestion.title, 'Markdown Extras: Math, Diagrams & More');
@@ -2236,6 +2250,395 @@ describe('whole-job filtering, apply targets, useSuggestion/undoMode, and chunke
       }
       await app.api('/api/notebooks/refresh', { method: 'POST' });
       rmSync(chunkDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Title detail levels and uniqueness pass', () => {
+  test('system prompts include level-specific rules, guards, and character budgets', { timeout: TEST_TIMEOUT_MS }, async () => {
+    await app.api('/api/notebooks');
+    const entry = await noteCache.ensureFresh(session, 'stale-ok');
+    const excludeSet = new Set([demoId('nb-work')]);
+
+    const shortOrg = buildOrganizeSystemPrompt(entry, excludeSet, 'short').systemPrompt;
+    const standardOrg = buildOrganizeSystemPrompt(entry, excludeSet, 'standard').systemPrompt;
+    const detailedOrg = buildOrganizeSystemPrompt(entry, excludeSet, 'detailed').systemPrompt;
+
+    assert.match(shortOrg, /Title detail level: short/);
+    assert.match(shortOrg, /max ~80 characters/);
+    assert.match(shortOrg, /last 4 digits only/);
+
+    assert.match(standardOrg, /Title detail level: standard/);
+    assert.match(standardOrg, /ONE detail/);
+    assert.match(standardOrg, /~100 characters/);
+    assert.match(standardOrg, /Never repeat information already in the date/);
+    assert.match(standardOrg, /already satisfies the standard level/);
+
+    assert.match(detailedOrg, /Title detail level: detailed/);
+    assert.match(detailedOrg, /up to 3 distinguishing details/);
+    assert.match(detailedOrg, /~140 characters/);
+    assert.match(detailedOrg, /already satisfies the detailed level/);
+
+    const shortRet = buildRetitleSystemPrompt('short');
+    const standardRet = buildRetitleSystemPrompt('standard');
+    const detailedRet = buildRetitleSystemPrompt('detailed');
+    assert.match(shortRet, /Title detail level: short/);
+    assert.match(standardRet, /Title detail level: standard/);
+    assert.match(detailedRet, /Title detail level: detailed/);
+  });
+
+  test('validates titleDetail (400 on unknown), persists on jobs, and loads legacy jobs as short', { timeout: TEST_TIMEOUT_MS }, async () => {
+    // Reject invalid titleDetail on jobs, dryRun, and editor retitle
+    const badJob = await app.api('/api/organize/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ noteIds: [demoId('note-scanned-invoice')], titleDetail: 'verbose' }),
+    });
+    assert.equal(badJob.status, 400);
+
+    const badDry = await app.api('/api/organize/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ sourceNotebookIds: [demoId('nb-work')], titleDetail: 'giant', dryRun: true }),
+    });
+    assert.equal(badDry.status, 400);
+
+    const goodDry = await app.api('/api/organize/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ sourceNotebookIds: [demoId('nb-work')], titleDetail: 'detailed', dryRun: true }),
+    });
+    assert.equal(goodDry.status, 200);
+    assert.equal(typeof goodDry.data.matched, 'number');
+
+    const badEditor = await app.api('/api/organize/retitle', {
+      method: 'POST',
+      body: JSON.stringify({ noteId: demoId('note-scanned-invoice'), titleDetail: 'invalid' }),
+    });
+    assert.equal(badEditor.status, 400);
+
+    // Fake client differentiates short / standard / detailed
+    const shortRes = await app.api('/api/organize/retitle', {
+      method: 'POST',
+      body: JSON.stringify({ noteId: demoId('note-scanned-invoice'), titleDetail: 'short' }),
+    });
+    const stdRes = await app.api('/api/organize/retitle', {
+      method: 'POST',
+      body: JSON.stringify({ noteId: demoId('note-scanned-invoice'), titleDetail: 'standard' }),
+    });
+    const detRes = await app.api('/api/organize/retitle', {
+      method: 'POST',
+      body: JSON.stringify({ noteId: demoId('note-scanned-invoice'), titleDetail: 'detailed' }),
+    });
+    assert.equal(shortRes.status, 200);
+    assert.equal(stdRes.status, 200);
+    assert.equal(detRes.status, 200);
+    assert.equal(shortRes.data.title, '2024-03-11 Acme Cloud Services – Dedicated Backup Storage Invoice');
+    assert.equal(stdRes.data.title, '2024-03-11 Acme Cloud Services – Dedicated Backup Storage Invoice – INV-2024-0311');
+    assert.equal(
+      detRes.data.title,
+      '2024-03-11 Acme Cloud Services – Dedicated Backup Storage Invoice – INV-2024-0311, Studio North Design'
+    );
+
+    // Persistence & legacy job loading (old jobs without titleDetail load as 'short')
+    const persistDir = mkdtempSync(join(tmpdir(), 'joplin-title-detail-persist-'));
+    try {
+      const ownerKey = noteCache.getOwnerKey(session);
+      const ownerDir = join(persistDir, 'organize', ownerKey);
+      mkdirSync(ownerDir, { recursive: true });
+      const legacyJobId = 'a'.repeat(32);
+      const legacyJob = {
+        id: legacyJobId,
+        mode: 'organize',
+        ownerKey,
+        status: 'done',
+        excludeNotebookIds: [],
+        allowedNotebookIds: [demoId('nb-projects')],
+        systemPrompt: 'legacy',
+        items: [],
+        usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+        lastUndo: null,
+        createdAt: 1_700_000_000_000,
+        updatedAt: 1_700_000_001_000,
+      };
+      writeFileSync(join(ownerDir, `${legacyJobId}.json`), JSON.stringify({ version: 2, job: legacyJob }));
+      writeFileSync(
+        join(ownerDir, 'index.json'),
+        JSON.stringify({
+          version: 2,
+          jobs: [
+            {
+              id: legacyJobId,
+              mode: 'organize',
+              status: 'done',
+              progress: { total: 0, done: 0, failed: 0 },
+              appliedCount: 0,
+              usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+              canUndo: false,
+              createdAt: 1_700_000_000_000,
+              updatedAt: 1_700_000_001_000,
+            },
+          ],
+        })
+      );
+
+      const svc = trackService(
+        new OrganizerService({
+          aiBaseUrl: 'http://127.0.0.1:18317/v1',
+          aiModel: 'test-model',
+          aiFake: true,
+          cacheDir: persistDir,
+        })
+      );
+      const list = svc.listJobs(session);
+      assert.equal(list.jobs.find((j) => j.id === legacyJobId)?.titleDetail, 'short');
+      const loadedLegacy = await svc.getJob(session, legacyJobId);
+      assert.equal(loadedLegacy.titleDetail, 'short');
+
+      // Start a new detailed job, restart service, confirm titleDetail persists
+      const started = await svc.startJob(session, {
+        noteIds: [demoId('note-scanned-invoice')],
+        mode: 'retitle',
+        titleDetail: 'detailed',
+      });
+      await svc.waitForIdle(session);
+      await svc.shutdown();
+
+      const svcReloaded = trackService(
+        new OrganizerService({
+          aiBaseUrl: 'http://127.0.0.1:18317/v1',
+          aiModel: 'test-model',
+          aiFake: true,
+          cacheDir: persistDir,
+        })
+      );
+      const reloadedJob = await svcReloaded.getJob(session, started.jobId);
+      assert.equal(reloadedJob.titleDetail, 'detailed');
+      assert.equal(svcReloaded.listJobs(session).jobs[0].titleDetail, 'detailed');
+    } finally {
+      rmSync(persistDir, { recursive: true, force: true });
+    }
+  });
+
+  test('uniqueness pass resolves 4-note collision group, resolves external collision without renaming non-job note, counts usage, and handles invalid output', { timeout: TEST_TIMEOUT_MS }, async () => {
+    const createdNoteIds: string[] = [];
+    const uniqDir = mkdtempSync(join(tmpdir(), 'joplin-uniqueness-'));
+
+    const createNote = async (title: string, body: string): Promise<string> => {
+      const res = await app.api('/api/notes', {
+        method: 'POST',
+        body: JSON.stringify({ parentId: demoId('nb-work'), title, body }),
+      });
+      assert.equal(res.status, 201);
+      createdNoteIds.push(res.data.id);
+      return res.data.id;
+    };
+
+    try {
+      // 4 colliding HMRC tax return notes in a job
+      const n1 = await createNote('scan_hmrc_1.pdf', 'HMRC Self Assessment Tax Return\nTaxpayer: Ting\nTax Year: 2021-22\nDate: 2023-10-26');
+      const n2 = await createNote('scan_hmrc_2.pdf', 'HMRC Self Assessment Tax Return\nTaxpayer: Jimmy\nTax Year: 2021-22\nDate: 2023-10-26');
+      const n3 = await createNote('scan_hmrc_3.pdf', 'HMRC Self Assessment Tax Return\nTaxpayer: Ting\nTax Year: 2022-23\nDate: 2023-10-26');
+      const n4 = await createNote('scan_hmrc_4.pdf', 'HMRC Self Assessment Tax Return\nTaxpayer: Alex\nTax Year: 2022-23\nDate: 2023-10-26');
+
+      // 1 existing non-job note + 1 job note that will collide with it (even though job note already has a meaningful title)
+      const existingNonJob = await createNote(
+        '2026-05-12 PrimeCredit – Credit Card Statement',
+        'PrimeCredit Credit Card Statement\nCard ending in 1104\nDate: 2026-05-12'
+      );
+      const jobCollidingExternal = await createNote(
+        '2026-05-12 PrimeCredit – Credit Card Statement',
+        'PrimeCredit Credit Card Statement\nCard ending in 3207\nDate: 2026-05-12'
+      );
+
+      let uniquenessCalls = 0;
+      const customCompletion: LlmCompletionFn = async (messages) => {
+        const sys = messages.find((m) => m.role === 'system')?.content ?? '';
+        const usr = messages.find((m) => m.role === 'user')?.content ?? '';
+        if (sys.startsWith('Task: Disambiguate colliding note titles.')) {
+          uniquenessCalls++;
+          if (usr.includes(n1)) {
+            assert.ok(usr.includes(n2) && usr.includes(n3) && usr.includes(n4), 'all 4 colliding notes in one call');
+            return {
+              content: JSON.stringify({
+                titles: {
+                  [n1]: '2023-10-26 HMRC – Tax Return – Ting 2021-22',
+                  [n2]: '2023-10-26 HMRC – Tax Return – Jimmy 2021-22',
+                  [n3]: '2023-10-26 HMRC – Tax Return – Ting 2022-23',
+                  [n4]: '2023-10-26 HMRC – Tax Return – Alex 2022-23',
+                },
+              }),
+              usage: { promptTokens: 300, completionTokens: 80, totalTokens: 380 },
+            };
+          }
+          if (usr.includes(jobCollidingExternal)) {
+            assert.ok(usr.includes('Existing notes with this title'), 'includes existing non-job note context');
+            assert.ok(usr.includes('1104'), 'includes existing note excerpt');
+            return {
+              content: JSON.stringify({
+                titles: {
+                  [jobCollidingExternal]: '2026-05-12 PrimeCredit – Credit Card Statement – …3207',
+                },
+              }),
+              usage: { promptTokens: 200, completionTokens: 40, totalTokens: 240 },
+            };
+          }
+        }
+        // Initial per-note calls return colliding titles
+        if (usr.includes('HMRC')) {
+          return {
+            content: JSON.stringify({
+              title: '2023-10-26 HMRC – Tax Return',
+              confidence: 0.9,
+              reason: 'HMRC tax return.',
+            }),
+            usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+          };
+        }
+        return {
+          content: JSON.stringify({
+            title: '2026-05-12 PrimeCredit – Credit Card Statement',
+            confidence: 0.9,
+            reason: 'Kept current title.',
+          }),
+          usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+        };
+      };
+
+      const svc = trackService(
+        new OrganizerService({
+          aiBaseUrl: 'http://127.0.0.1:18317/v1',
+          aiModel: 'test-model',
+          aiFake: false,
+          cacheDir: uniqDir,
+          completionFn: customCompletion,
+        })
+      );
+
+      const started = await svc.startJob(session, {
+        noteIds: [n1, n2, n3, n4, jobCollidingExternal],
+        mode: 'retitle',
+        titleDetail: 'short',
+      });
+      await svc.waitForIdle(session);
+
+      assert.equal(uniquenessCalls, 2);
+      const job = await svc.getJob(session, started.jobId);
+      assert.equal(job.status, 'done');
+      // 5 per-note calls (120 each = 600) + 2 uniqueness calls (380 + 240 = 620) = 1220
+      assert.equal(job.usage.totalTokens, 1220);
+
+      const byId = new Map(job.items.map((it) => [it.noteId, it]));
+      assert.equal(byId.get(n1)?.suggestion?.title, '2023-10-26 HMRC – Tax Return – Ting 2021-22');
+      assert.equal(byId.get(n2)?.suggestion?.title, '2023-10-26 HMRC – Tax Return – Jimmy 2021-22');
+      assert.equal(byId.get(n3)?.suggestion?.title, '2023-10-26 HMRC – Tax Return – Ting 2022-23');
+      assert.equal(byId.get(n4)?.suggestion?.title, '2023-10-26 HMRC – Tax Return – Alex 2022-23');
+      for (const nid of [n1, n2, n3, n4]) {
+        assert.equal(byId.get(nid)?.titleMadeUnique, true);
+        assert.equal(byId.get(nid)?.titleCollision, undefined);
+      }
+
+      // External collision was resolved and overrides "unchanged"
+      assert.equal(
+        byId.get(jobCollidingExternal)?.suggestion?.title,
+        '2026-05-12 PrimeCredit – Credit Card Statement – …3207'
+      );
+      assert.equal(byId.get(jobCollidingExternal)?.titleMadeUnique, true);
+      assert.equal(byId.get(jobCollidingExternal)?.unchanged, false);
+      assert.equal(byId.get(jobCollidingExternal)?.titleCollision, undefined);
+
+      // Existing non-job note is NEVER renamed
+      const existingAfter = (await app.api(`/api/notes/${existingNonJob}`)).data;
+      assert.equal(existingAfter.title, '2026-05-12 PrimeCredit – Credit Card Statement');
+
+      // Invalid uniqueness LLM output (duplicate titles / extension) keeps originals and flags remaining titleCollision
+      const badCompletion: LlmCompletionFn = async (messages) => {
+        const sys = messages.find((m) => m.role === 'system')?.content ?? '';
+        if (sys.startsWith('Task: Disambiguate colliding note titles.')) {
+          return {
+            content: JSON.stringify({
+              titles: {
+                [n1]: '2023-10-26 HMRC – Tax Return.pdf',
+                [n2]: '2023-10-26 HMRC – Tax Return – Same',
+              },
+            }),
+            usage: { promptTokens: 50, completionTokens: 20, totalTokens: 70 },
+          };
+        }
+        return {
+          content: JSON.stringify({
+            title: '2023-10-26 HMRC – Tax Return',
+            confidence: 0.9,
+            reason: 'Tax return.',
+          }),
+          usage: { promptTokens: 40, completionTokens: 10, totalTokens: 50 },
+        };
+      };
+
+      const badSvc = trackService(
+        new OrganizerService({
+          aiBaseUrl: 'http://127.0.0.1:18317/v1',
+          aiModel: 'test-model',
+          aiFake: false,
+          cacheDir: null,
+          completionFn: badCompletion,
+        })
+      );
+      const badStarted = await badSvc.startJob(session, {
+        noteIds: [n1, n2],
+        mode: 'retitle',
+        titleDetail: 'standard',
+      });
+      await badSvc.waitForIdle(session);
+      const badJob = await badSvc.getJob(session, badStarted.jobId);
+      assert.equal(badJob.items[0].suggestion?.title, '2023-10-26 HMRC – Tax Return');
+      assert.equal(badJob.items[1].suggestion?.title, '2023-10-26 HMRC – Tax Return');
+      assert.equal(badJob.items[0].titleMadeUnique, undefined);
+      assert.equal(badJob.items[0].titleCollision, 1);
+      assert.equal(badJob.items[1].titleCollision, 1);
+
+      // Editor one-off suggestRetitle disambiguates when suggestion matches another active note
+      let editorDisambigCalled = false;
+      const editorSvc = trackService(
+        new OrganizerService({
+          aiBaseUrl: 'http://127.0.0.1:18317/v1',
+          aiModel: 'test-model',
+          aiFake: false,
+          cacheDir: null,
+          completionFn: async (messages) => {
+            const sys = messages.find((m) => m.role === 'system')?.content ?? '';
+            if (sys.startsWith('Task: Disambiguate colliding note titles.')) {
+              editorDisambigCalled = true;
+              return {
+                content: JSON.stringify({
+                  titles: {
+                    [jobCollidingExternal]: '2026-05-12 PrimeCredit – Credit Card Statement – …3207',
+                  },
+                }),
+              };
+            }
+            return {
+              content: JSON.stringify({
+                title: '2026-05-12 PrimeCredit – Credit Card Statement',
+                confidence: 0.9,
+                reason: 'Statement.',
+              }),
+            };
+          },
+        })
+      );
+
+      const editorResult = await editorSvc.suggestRetitle(session, jobCollidingExternal, 'standard');
+      assert.equal(editorDisambigCalled, true);
+      assert.equal(editorResult.title, '2026-05-12 PrimeCredit – Credit Card Statement – …3207');
+      // Non-target existing note still untouched
+      assert.equal(
+        (await app.api(`/api/notes/${existingNonJob}`)).data.title,
+        '2026-05-12 PrimeCredit – Credit Card Statement'
+      );
+    } finally {
+      for (const nid of createdNoteIds) {
+        app.mock.items.delete(`${nid}.md`);
+      }
+      await app.api('/api/notebooks/refresh', { method: 'POST' });
+      rmSync(uniqDir, { recursive: true, force: true });
     }
   });
 });
