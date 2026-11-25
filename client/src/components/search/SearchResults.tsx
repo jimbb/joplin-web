@@ -10,8 +10,6 @@ import { QueryError } from "@/components/common/QueryError";
 import { NOTE_LIST_PAGE_SIZE, SEARCH_SYNTAX_HINT } from "@/lib/ui-constants";
 import { PromptDialog } from "@/components/common/Dialogs";
 
-export { NOTE_LIST_PAGE_SIZE } from "@/lib/ui-constants";
-
 interface SearchResultsProps {
   query: string;
   results: SearchResult[];

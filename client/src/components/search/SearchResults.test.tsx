@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { HighlightedText, NOTE_LIST_PAGE_SIZE, SearchResults } from "./SearchResults";
+import { HighlightedText, SearchResults } from "./SearchResults";
+import { NOTE_LIST_PAGE_SIZE } from "@/lib/ui-constants";
 import type { SearchResult } from "@/lib/types";
 
 afterEach(cleanup);
