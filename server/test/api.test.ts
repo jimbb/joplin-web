@@ -1041,8 +1041,19 @@ describe('security', () => {
     assert.equal(trashedNote.status, 200);
     assert.ok(trashedNote.data.deletedTime > 0, 'duplicate copy must be in trash');
 
-    // Clean up created notes so subsequent tests stay unaffected
+    // A trashed keeper must not take its copies with it
+    const restoreDup = await api(`/api/notes/${dupId}/restore`, { method: 'POST' });
+    assert.equal(restoreDup.status, 200);
     await api(`/api/notes/${keepId}`, { method: 'DELETE' });
+    const trashedKeeperRes = await api('/api/organize/hygiene/resolve', {
+      method: 'POST',
+      body: JSON.stringify({ keepNoteId: keepId, trashNoteIds: [dupId], mergeTags: false }),
+    });
+    assert.equal(trashedKeeperRes.status, 409);
+    assert.equal((await api(`/api/notes/${dupId}`)).data.deletedTime, 0, 'copy stays when the keeper is trashed');
+
+    // Clean up created notes so subsequent tests stay unaffected
+    await api(`/api/notes/${dupId}`, { method: 'DELETE' });
     await api(`/api/notes/${keepId}?permanent=true`, { method: 'DELETE' });
     await api(`/api/notes/${dupId}?permanent=true`, { method: 'DELETE' });
   });

@@ -199,6 +199,13 @@ export function createOrganizeRouter(service: OrganizerService = organizerServic
       return;
     }
 
+    // Never trash the copies when the note to keep is gone or already in the trash (e.g. changed in another tab)
+    const keeper = await noteCache.getNote(req.sessionId!, validKeeperId);
+    if (!keeper || keeper.deletedTime > 0) {
+      res.status(409).json({ error: 'The note to keep no longer exists or is in the trash; refresh and try again' });
+      return;
+    }
+
     const shouldMergeTags = mergeTags !== false;
     let mergedTags: string[] = [];
 
