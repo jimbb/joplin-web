@@ -175,14 +175,14 @@ export function NotesPage() {
   }, [recordRecentRead.mutate]);
   useEffect(() => {
     const id = fullNote?.id;
-    if (!id || readOnly || fullNote.deletedTime || fullNote.encrypted) return;
+    if (!id || readOnly || fullNote.deletedTime || fullNote.encrypted || fullNote.isTodo) return;
     if (lastRecordedReadRef.current === id) return;
     const timer = window.setTimeout(() => {
       lastRecordedReadRef.current = id;
       recordReadMutateRef.current(id);
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [fullNote?.id, fullNote?.deletedTime, fullNote?.encrypted, readOnly]);
+  }, [fullNote?.id, fullNote?.deletedTime, fullNote?.encrypted, fullNote?.isTodo, readOnly]);
 
   const isSearchActive = debouncedQuery.length >= 2;
   // Remount the list per scope so its filter doesn't carry over to another notebook or tag
@@ -198,7 +198,8 @@ export function NotesPage() {
   useEffect(() => {
     if (!openedViaNoteUrl.current || !fullNote) return;
     openedViaNoteUrl.current = false;
-    if (scope.kind === "all" && fullNote.id === selectedNoteId && !fullNote.deletedTime) {
+    // To-dos live in the Tasks Hub, not in notebook lists, so stay on /notes/:id when one is opened directly
+    if (scope.kind === "all" && fullNote.id === selectedNoteId && !fullNote.deletedTime && !fullNote.isTodo) {
       // Conflict copies are not listed in their notebook, only under Conflicts
       const target: ListScope = fullNote.isConflict
         ? { kind: "conflicts" }
@@ -273,6 +274,10 @@ export function NotesPage() {
       {
         onSuccess: (note) => {
           setSearchQuery("");
+          if (isTodo) {
+            navigate(`/tasks/${note.id}`, { state: { startInEdit: true } });
+            return;
+          }
           setEditIntentNoteId(note.id);
           // Open it in the list it was created from; from the trash or a tag, show its notebook
           navigate(
@@ -714,6 +719,7 @@ export function NotesPage() {
             notebooks={notebooks}
             readOnly={readOnly}
             startInEdit={editIntentNoteId !== null && editIntentNoteId === selectedNoteId}
+            openInTasksTo={fullNote?.isTodo ? `/tasks/${fullNote.id}` : undefined}
             onRemoved={handleNoteRemoved}
             isLoading={isLoadingNote}
             // A note that loaded before stays on screen (and in an open editor) when a refetch fails

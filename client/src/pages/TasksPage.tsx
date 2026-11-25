@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
@@ -10,12 +10,12 @@ import {
   ChevronDown,
   ChevronRight,
   Circle,
-  ExternalLink,
   Eye,
   EyeOff,
   Folder,
   Layers,
   ListChecks,
+  Loader2,
   Pencil,
   Plus,
   Search,
@@ -26,6 +26,7 @@ import {
 import { toast } from "sonner";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { Sidebar } from "@/components/layout/Sidebar";
+import { NoteViewer } from "@/components/notes/NoteViewer";
 import { QueryError } from "@/components/common/QueryError";
 import { TaskCategoryDialog, type TaskCategoryPrefill } from "@/components/tasks/TaskCategoryDialog";
 import { Badge } from "@/components/ui/badge";
@@ -41,9 +42,9 @@ import {
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useConflictNotes } from "@/hooks/use-notes";
+import { useConflictNotes, useNote } from "@/hooks/use-notes";
 import { useNotebooks } from "@/hooks/use-notebooks";
-import { useUpdateNote } from "@/hooks/use-mutations";
+import { useCreateNote, useUpdateNote } from "@/hooks/use-mutations";
 import { useOrganizeJobs, useOrganizeStatus } from "@/hooks/use-organize";
 import {
   useCreateTaskCategory,
@@ -58,7 +59,7 @@ import { useWriteState } from "@/hooks/use-write-state";
 import { ApiError } from "@/lib/api";
 import { formatDueDate, isOverdue } from "@/lib/due";
 import { noteDisplayTitle } from "@/lib/format";
-import { buildNotebookPathMap } from "@/lib/notebooks";
+import { buildNotebookPathMap, findNotebookById, flattenNotebooks } from "@/lib/notebooks";
 import {
   buildNotebookLineageMap,
   customCategoryIdFromKey,
@@ -229,14 +230,25 @@ function matchesCategorySelection(
   return item.notebookCategoryKey === selectedCategory;
 }
 
+function parseTaskTab(raw: string | null): TaskFilter {
+  if (raw === "overdue" || raw === "completed" || raw === "inline" || raw === "todos") return raw;
+  return "open";
+}
+
 export function TasksPage() {
+  const { id: selectedNoteId = null } = useParams<{ id?: string }>();
+  const location = useLocation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const [headerSearch, setHeaderSearch] = useState("");
   const [filterText, setFilterText] = useState("");
-  const [tab, setTab] = useState<TaskFilter>("open");
+  const tab: TaskFilter = parseTaskTab(searchParams.get("tab"));
   const [mountTime] = useState(() => Date.now());
+  const [editIntentNoteId, setEditIntentNoteId] = useState<string | null>(() => {
+    const state = location.state as { startInEdit?: boolean } | null;
+    return state?.startInEdit && selectedNoteId ? selectedNoteId : null;
+  });
   const [categoryMenuOpen, setCategoryMenuOpen] = useState(false);
   const [categorySearch, setCategorySearch] = useState("");
   const [groupByCategory, setGroupByCategory] = useState<boolean>(loadGroupByCategory);
@@ -249,6 +261,21 @@ export function TasksPage() {
   const [categoryPrefill, setCategoryPrefill] = useState<TaskCategoryPrefill | null>(null);
 
   const rawSelectedCategory = searchParams.get("category") || "all";
+  const rawLineParam = searchParams.get("line");
+  const parsedLine = rawLineParam ? Number(rawLineParam) : NaN;
+  const selectedLine = Number.isInteger(parsedLine) && parsedLine > 0 ? parsedLine : null;
+
+  const setTab = (nextTab: TaskFilter) => {
+    setSearchParams(
+      (prev) => {
+        const updated = new URLSearchParams(prev);
+        if (nextTab === "open") updated.delete("tab");
+        else updated.set("tab", nextTab);
+        return updated;
+      },
+      { replace: true }
+    );
+  };
 
   const selectCategory = (next: string) => {
     setSearchParams(
@@ -262,6 +289,18 @@ export function TasksPage() {
     );
   };
 
+  const tasksUrl = (noteId?: string | null, opts?: { line?: number | null }) => {
+    const next = new URLSearchParams(searchParams);
+    if (opts?.line && Number.isInteger(opts.line) && opts.line > 0) {
+      next.set("line", String(opts.line));
+    } else {
+      next.delete("line");
+    }
+    const qs = next.toString();
+    const base = noteId ? `/tasks/${noteId}` : "/tasks";
+    return qs ? `${base}?${qs}` : base;
+  };
+
   const { readOnly, reason: readOnlyReason } = useWriteState();
   const { data: notebooks } = useNotebooks();
   const { data: tags } = useTags();
@@ -270,6 +309,8 @@ export function TasksPage() {
   const { data: organizeStatus } = useOrganizeStatus();
   const { data: organizeJobsData } = useOrganizeJobs(Boolean(organizeStatus?.enabled));
   const tasksQuery = useTasks(true);
+  const noteQuery = useNote(selectedNoteId);
+  const createNote = useCreateNote();
   const updateNote = useUpdateNote();
   const toggleInline = useToggleInlineTask();
   const createTaskCategoryMutation = useCreateTaskCategory();
@@ -907,6 +948,92 @@ export function TasksPage() {
     }
   };
 
+  // Target notebook for "New task": currently filtered notebook/category if obvious, else default notebook
+  const targetNotebookId = useMemo(() => {
+    const usable = (id: string | null | undefined): id is string => {
+      if (!id) return false;
+      const nb = findNotebookById(notebooks, id);
+      return Boolean(nb && !nb.encrypted);
+    };
+    if (
+      selectedCategory !== "all" &&
+      !isCustomCategoryKey(selectedCategory) &&
+      !isGroupCategoryKey(selectedCategory) &&
+      usable(selectedCategory)
+    ) {
+      return selectedCategory;
+    }
+    if (isCustomCategoryKey(selectedCategory)) {
+      const cat = customCategoryById.get(customCategoryIdFromKey(selectedCategory));
+      const ruleNb = cat?.rules.notebookIds?.find((nbId) => usable(nbId));
+      if (ruleNb) return ruleNb;
+      const prefixes = cat?.rules.notebookPathPrefixes ?? [];
+      if (prefixes.length > 0) {
+        for (const [nbId, path] of notebookPathById) {
+          if (
+            usable(nbId) &&
+            prefixes.some((p) => {
+              const norm = p.trim().toLowerCase();
+              const pathLower = path.toLowerCase();
+              return Boolean(norm) && (pathLower === norm || pathLower.startsWith(`${norm} / `));
+            })
+          ) {
+            return nbId;
+          }
+        }
+      }
+    }
+    if (isGroupCategoryKey(selectedCategory)) {
+      const topName = groupNameFromKey(selectedCategory).toLowerCase();
+      const topMatch = (notebooks ?? []).find((nb) => !nb.encrypted && nb.title.toLowerCase() === topName);
+      if (topMatch) return topMatch.id;
+      const group = parentGroupByKey.get(selectedCategory);
+      const memberNb = group?.memberKeys.find((k) => usable(k));
+      if (memberNb) return memberNb;
+    }
+    return flattenNotebooks(notebooks).find((nb) => !nb.encrypted)?.id ?? null;
+  }, [selectedCategory, notebooks, customCategoryById, notebookPathById, parentGroupByKey]);
+
+  const handleCreateTask = () => {
+    if (!targetNotebookId) {
+      toast.error("Create a notebook first", { description: "Tasks in Joplin always belong to a notebook." });
+      return;
+    }
+    createNote.mutate(
+      { parentId: targetNotebookId, title: "", body: "", isTodo: true },
+      {
+        onSuccess: (note) => {
+          setEditIntentNoteId(note.id);
+          navigate(tasksUrl(note.id));
+        },
+        onError: (err) => toast.error("Could not create task", { description: err.message }),
+      }
+    );
+  };
+
+  const openTask = (task: UnifiedTask) => {
+    setEditIntentNoteId(null);
+    const line = task.kind === "inline" ? task.raw.line : null;
+    if (task.noteId !== selectedNoteId || line !== selectedLine) {
+      navigate(tasksUrl(task.noteId, { line }));
+    }
+  };
+
+  const handleCloseTask = () => {
+    setEditIntentNoteId(null);
+    navigate(tasksUrl(null));
+  };
+
+  const handleTaskRemoved = () => {
+    setEditIntentNoteId(null);
+    navigate(tasksUrl(null), { replace: true });
+  };
+
+  const todoNoteIds = useMemo(
+    () => new Set(allTasks.filter((t) => t.kind === "todo").map((t) => t.noteId)),
+    [allTasks]
+  );
+
   const renderTaskCard = (task: UnifiedTask, showPrimaryCategoryBadge: boolean) => {
     const busy = updateNote.isPending || toggleInline.isPending;
     const customCat = task.primaryCustomCategory;
@@ -917,12 +1044,29 @@ export function TasksPage() {
         : task.notebookCategoryLabel;
     const host = extractSourceHost(task.sourceUrl);
     const showNotebookChip = showPrimaryCategoryBadge || Boolean(customCat);
+    const taskHref = tasksUrl(task.noteId, { line: task.kind === "inline" ? task.raw.line : null });
+    const isSelected = Boolean(
+      selectedNoteId &&
+        task.noteId === selectedNoteId &&
+        (selectedLine !== null
+          ? task.kind === "inline" && task.raw.line === selectedLine
+          : task.kind === "todo" || !todoNoteIds.has(selectedNoteId))
+    );
 
     return (
       <div
         key={task.key}
+        data-selected={isSelected ? "true" : undefined}
+        onClick={(e) => {
+          const target = e.target as Element | null;
+          if (target?.closest('a, button, [role="checkbox"], [role="menuitem"]')) return;
+          openTask(task);
+        }}
         className={cn(
-          "flex min-w-0 items-start gap-3 overflow-hidden rounded-xl border border-border bg-card/50 px-3.5 py-2.5 transition-colors hover:bg-card",
+          "flex min-w-0 cursor-pointer items-start gap-2.5 overflow-hidden rounded-xl border border-l-2 px-3 py-2.5 transition-colors",
+          isSelected
+            ? "border-border border-l-primary bg-card ring-1 ring-primary/20"
+            : "border-border border-l-transparent bg-card/50 hover:bg-card",
           task.completed && "opacity-70"
         )}
       >
@@ -932,7 +1076,10 @@ export function TasksPage() {
           aria-checked={task.completed}
           aria-label={`Toggle "${task.title}"`}
           disabled={readOnly || busy}
-          onClick={() => void handleToggle(task)}
+          onClick={(e) => {
+            e.stopPropagation();
+            void handleToggle(task);
+          }}
           className="mt-0.5 shrink-0 text-primary disabled:opacity-50"
         >
           {task.completed ? (
@@ -944,27 +1091,18 @@ export function TasksPage() {
 
         <div className="min-w-0 flex-1 space-y-1">
           <div className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1">
-            {task.kind === "todo" ? (
-              <Link
-                to={`/notes/${task.noteId}`}
-                className={cn(
-                  "inline-flex min-w-0 max-w-full items-start gap-1 text-sm font-medium text-foreground hover:text-primary hover:underline",
-                  task.completed && "line-through text-muted-foreground"
-                )}
-              >
-                <span className="min-w-0 break-words [overflow-wrap:anywhere]">{task.title}</span>
-                <ExternalLink className="mt-1 h-3 w-3 shrink-0 opacity-70" />
-              </Link>
-            ) : (
-              <span
-                className={cn(
-                  "min-w-0 max-w-full break-words [overflow-wrap:anywhere] text-sm font-medium text-foreground",
-                  task.completed && "line-through text-muted-foreground"
-                )}
-              >
-                {task.title}
-              </span>
-            )}
+            <Link
+              to={taskHref}
+              aria-current={isSelected ? "page" : undefined}
+              onClick={() => setEditIntentNoteId(null)}
+              className={cn(
+                "min-w-0 max-w-full break-words [overflow-wrap:anywhere] text-sm font-medium text-foreground hover:text-primary hover:underline",
+                isSelected && "font-semibold",
+                task.completed && "line-through text-muted-foreground"
+              )}
+            >
+              {task.title}
+            </Link>
             <Badge variant="outline" className="shrink-0 text-[10px] font-normal">
               {task.kind === "todo" ? "To-do" : "Checklist"}
             </Badge>
@@ -984,18 +1122,21 @@ export function TasksPage() {
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
             {task.kind === "inline" && (
               <Link
-                to={`/notes/${task.noteId}`}
+                to={taskHref}
+                onClick={() => setEditIntentNoteId(null)}
                 className="inline-flex min-w-0 max-w-full items-center gap-1 hover:text-primary hover:underline"
               >
                 <span className="truncate">{task.noteTitle}</span>
-                <ExternalLink className="h-3 w-3 shrink-0" />
               </Link>
             )}
 
             {showPrimaryCategoryBadge && customCat && customColor && (
               <button
                 type="button"
-                onClick={() => selectCategory(customCategoryKey(customCat.id))}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  selectCategory(customCategoryKey(customCat.id));
+                }}
                 title={`Filter by ${customCat.name}`}
                 className={cn(
                   "inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-[11px] font-medium transition-opacity hover:opacity-85",
@@ -1013,7 +1154,10 @@ export function TasksPage() {
             {showNotebookChip && (
               <button
                 type="button"
-                onClick={() => selectCategory(task.notebookCategoryKey)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  selectCategory(task.notebookCategoryKey);
+                }}
                 title={`Filter by ${task.notebookCategoryLabel}`}
                 className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-md bg-muted/60 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               >
@@ -1026,6 +1170,7 @@ export function TasksPage() {
               <DropdownMenuTrigger asChild>
                 <button
                   type="button"
+                  onClick={(e) => e.stopPropagation()}
                   aria-label={`Assign category for "${task.title}"`}
                   title="Assign category"
                   className="inline-flex h-5 items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground/80 transition-colors hover:bg-accent hover:text-foreground"
@@ -1105,6 +1250,7 @@ export function TasksPage() {
   return (
     <AppLayout
       notebookTitle="Tasks"
+      noteTitle={noteQuery.data ? noteDisplayTitle(noteQuery.data) : undefined}
       searchQuery={headerSearch}
       onSearchChange={(q) => {
         setHeaderSearch(q);
@@ -1161,28 +1307,62 @@ export function TasksPage() {
         />
       )}
     >
-      <div className="flex flex-col h-full min-w-0 w-full bg-background overflow-hidden">
-        <div className="shrink-0 min-w-0 overflow-x-hidden border-b border-border bg-card/40 px-4 py-4 sm:px-8 space-y-3">
-          <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+      <div className="flex h-full w-full overflow-hidden bg-background">
+        {/* Left pane: Task List */}
+        <div
+          className={cn(
+            "w-full md:w-80 lg:w-96 xl:w-[26rem] shrink-0 h-full border-r border-border flex flex-col bg-background overflow-hidden",
+            selectedNoteId ? "hidden md:flex" : "flex"
+          )}
+        >
+        <div className="shrink-0 min-w-0 overflow-x-hidden border-b border-border bg-card/40 px-4 py-3.5 space-y-2.5">
+          <div className="flex min-w-0 items-center justify-between gap-2">
             <div className="min-w-0">
-              <h1 className="flex items-center gap-2 text-xl font-bold text-foreground">
-                <CheckSquare className="h-5 w-5 shrink-0 text-primary" aria-hidden="true" />
-                Tasks Hub
+              <h1 className="flex items-center gap-2 text-base font-bold tracking-tight text-foreground">
+                <CheckSquare className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+                <span className="truncate">Tasks Hub</span>
               </h1>
-              <p className="text-xs text-muted-foreground">
-                To-do notes and interactive `- [ ]` checkboxes aggregated across your notes.
+              <p className="text-xs text-muted-foreground truncate">
+                To-dos and checklists across your notes
               </p>
             </div>
-            <div className="relative w-full sm:w-64">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-              <Input
-                value={filterText}
-                onChange={(e) => setFilterText(e.target.value)}
-                placeholder="Filter tasks…"
-                aria-label="Filter tasks"
-                className="h-8 pl-8 text-xs"
-              />
-            </div>
+            {!readOnly && (
+              <Button
+                type="button"
+                size="sm"
+                onClick={handleCreateTask}
+                disabled={createNote.isPending}
+                className="h-7 shrink-0 gap-1 px-2.5 text-xs"
+              >
+                {createNote.isPending ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Plus className="h-3.5 w-3.5" />
+                )}
+                New task
+              </Button>
+            )}
+          </div>
+
+          <div className="relative w-full">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+            <Input
+              value={filterText}
+              onChange={(e) => setFilterText(e.target.value)}
+              placeholder="Filter tasks…"
+              aria-label="Filter tasks"
+              className="h-8 pl-8 pr-8 text-xs"
+            />
+            {filterText && (
+              <button
+                type="button"
+                onClick={() => setFilterText("")}
+                aria-label="Clear task filter"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
           </div>
 
           <div className="flex min-w-0 flex-wrap items-center gap-1.5">
@@ -1612,9 +1792,9 @@ export function TasksPage() {
 
         <div
           data-testid="tasks-scroll-container"
-          className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden px-4 py-4 sm:px-8"
+          className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden px-3 py-3"
         >
-          <div className="mx-auto w-full max-w-4xl min-w-0 space-y-3">
+          <div className="w-full min-w-0 space-y-3">
             {selectedCategoryHiddenKeys.length > 0 && (
               <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
                 <span className="inline-flex items-center gap-1.5">
@@ -1830,6 +2010,37 @@ export function TasksPage() {
               </div>
             )}
           </div>
+        </div>
+        </div>
+
+        {/* Right pane: Selected Task / Note Viewer */}
+        <div
+          className={cn(
+            "flex-1 h-full min-w-0",
+            !selectedNoteId ? "hidden md:flex flex-col" : "flex flex-col"
+          )}
+        >
+          <NoteViewer
+            key={selectedNoteId ?? "none"}
+            note={selectedNoteId ? noteQuery.data : null}
+            notebooks={notebooks}
+            readOnly={readOnly}
+            startInEdit={editIntentNoteId !== null && editIntentNoteId === selectedNoteId}
+            highlightTaskLine={selectedLine}
+            emptyTitle="No task selected"
+            emptyDescription="Select a task from the list or create a new one."
+            isLoading={Boolean(selectedNoteId && noteQuery.isLoading)}
+            error={noteQuery.data ? null : noteQuery.error}
+            isStale={Boolean(noteQuery.data && noteQuery.isError)}
+            onRetry={() => void noteQuery.refetch()}
+            isRetrying={noteQuery.isFetching}
+            onNoteSaved={() => void queryClient.invalidateQueries({ queryKey: TASKS_QUERY_KEY })}
+            onTagClick={(tagId) => navigate(`/notes?tag=${encodeURIComponent(tagId)}`)}
+            onNotebookClick={(nbId) => navigate(`/notebooks/${nbId}`)}
+            onOpenNote={(id) => navigate(`/notes/${id}`)}
+            onClose={handleCloseTask}
+            onRemoved={handleTaskRemoved}
+          />
         </div>
       </div>
 

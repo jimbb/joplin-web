@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link as RouterLink } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { MARKUP_HTML, Note, NoteAssistAction, Notebook } from "@/lib/types";
@@ -31,6 +32,7 @@ import {
   Folder,
   FolderInput,
   CheckCircle2,
+  CheckSquare,
   Circle,
   AlertCircle,
   Copy,
@@ -87,6 +89,15 @@ interface NoteViewerProps {
   readOnly?: boolean;
   /** Open the note directly in the editor (e.g. right after creating it) */
   startInEdit?: boolean;
+  /** When showing a to-do outside the Tasks Hub (e.g. from search or a note link), link to open it there */
+  openInTasksTo?: string;
+  /** 1-based line of an inline GFM checklist task to scroll to and highlight */
+  highlightTaskLine?: number | null;
+  /** Custom heading/description when no note is selected */
+  emptyTitle?: string;
+  emptyDescription?: string;
+  /** Called after an editor save or inline task checkbox save completes */
+  onNoteSaved?: (saved: Note) => void;
   onTagClick?: (tagId: string) => void;
   onNotebookClick?: (notebookId: string) => void;
   /** Opens another note, e.g. the original of a conflict copy */
@@ -141,6 +152,11 @@ export function NoteViewer({
   notebooks,
   readOnly = false,
   startInEdit = false,
+  openInTasksTo,
+  highlightTaskLine = null,
+  emptyTitle = "No note selected",
+  emptyDescription = "Select a note from the list or create a new one.",
+  onNoteSaved,
   onTagClick,
   onNotebookClick,
   onOpenNote,
@@ -182,7 +198,7 @@ export function NoteViewer({
   const deleteNote = useDeleteNote();
   const restoreNote = useRestoreNote();
   const addTag = useAddTag();
-  const toggleTask = useTaskToggle(note?.id);
+  const toggleTask = useTaskToggle(note?.id, onNoteSaved);
   const { data: preferences } = usePreferences(Boolean(note && !readOnly && !note.encrypted));
   const toggleFavorite = useToggleFavoriteNote();
   const { data: aiStatus } = useAiStatus();
@@ -235,9 +251,9 @@ export function NoteViewer({
         <div className="h-16 w-16 rounded-2xl bg-muted/40 border border-border/50 flex items-center justify-center text-muted-foreground mb-4 shadow-xs">
           <FileText className="h-8 w-8 opacity-40" />
         </div>
-        <h3 className="text-lg font-semibold text-foreground">No note selected</h3>
+        <h3 className="text-lg font-semibold text-foreground">{emptyTitle}</h3>
         <p className="text-xs text-muted-foreground mt-1 max-w-xs leading-relaxed">
-          Select a note from the list or create a new one.
+          {emptyDescription}
         </p>
       </div>
     );
@@ -478,7 +494,7 @@ export function NoteViewer({
   return (
     <div className="flex flex-col h-full bg-background relative overflow-hidden">
       {/* Header bar */}
-      <div className="px-4 sm:px-6 py-3 flex items-center justify-between gap-3 bg-background z-10">
+      <div className="px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-2 sm:gap-3 bg-background z-10">
         <div className="flex flex-wrap items-center gap-2 min-w-0">
           {note.notebookTitle && (
             <button
@@ -500,7 +516,7 @@ export function NoteViewer({
               aria-label={note.todoCompleted ? "Done: mark as not done" : "To do: mark as done"}
               title={note.todoCompleted ? "Mark as not done" : "Mark as done"}
               className={cn(
-                "inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors disabled:opacity-60",
+                "inline-flex items-center gap-1 whitespace-nowrap rounded-md border px-2 py-1 text-xs font-medium transition-colors disabled:opacity-60",
                 note.todoCompleted
                   ? "bg-success/10 text-success border-success/30 hover:bg-success/20"
                   : "bg-warning/10 text-warning border-warning/30 hover:bg-warning/20"
@@ -518,6 +534,16 @@ export function NoteViewer({
             </Badge>
           )}
           <TodoDueDate note={note} readOnly={!canEdit} />
+
+          {note.isTodo && !isTrashed && openInTasksTo && (
+            <RouterLink
+              to={openInTasksTo}
+              className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-muted/50 px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+            >
+              <CheckSquare className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
+              <span>Open in Tasks</span>
+            </RouterLink>
+          )}
 
           {isTrashed && (
             <Badge
@@ -537,7 +563,7 @@ export function NoteViewer({
           )}
         </div>
 
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex items-center gap-1 ml-auto shrink-0">
           {!locked && !isTrashed && !editing && headings.length > 0 && (
             <Popover open={outlineOpen} onOpenChange={setOutlineOpen}>
               <PopoverTrigger asChild>
@@ -811,6 +837,7 @@ export function NoteViewer({
               note={note}
               focusTitle={startInEdit && !note.title}
               initialDraft={restoredDraft}
+              onSaved={onNoteSaved}
               onDone={() => {
                 setRestoredDraft(null);
                 setIsEditing(false);
@@ -1034,6 +1061,7 @@ export function NoteViewer({
                   content={note.body}
                   html={note.markupLanguage === MARKUP_HTML}
                   onToggleTask={canEdit ? toggleTask : undefined}
+                  highlightTaskLine={highlightTaskLine}
                 />
               ) : canEdit ? (
                 <button
@@ -1122,10 +1150,14 @@ const TASK_SAVE_DELAY_MS = 600;
  * Checkbox toggling in read mode: updates the cached note immediately and saves the body
  * shortly after (one save at a time, so quick successive clicks don't conflict with each other).
  */
-function useTaskToggle(noteId: string | undefined) {
+function useTaskToggle(noteId: string | undefined, onNoteSaved?: (saved: Note) => void) {
   const queryClient = useQueryClient();
   const saver = useNoteSaver(noteId);
   const timerRef = useRef<number | null>(null);
+  const onNoteSavedRef = useRef(onNoteSaved);
+  useEffect(() => {
+    onNoteSavedRef.current = onNoteSaved;
+  }, [onNoteSaved]);
 
   // Flush a pending save when the note is closed instead of dropping it
   const saveRef = useRef<(() => Promise<void>) | undefined>(undefined);
@@ -1157,6 +1189,7 @@ function useTaskToggle(noteId: string | undefined) {
       {
         // Keep any newer optimistic body (more clicks while saving); its save is already scheduled
         toCache: (saved) => ({ ...saved, body: queryClient.getQueryData<Note>(["note", noteId])?.body ?? saved.body }),
+        onSaved: (saved) => onNoteSavedRef.current?.(saved),
         onError: (err) => {
           if (timerRef.current !== null) window.clearTimeout(timerRef.current);
           timerRef.current = null;

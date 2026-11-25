@@ -4,7 +4,7 @@ import { Notebook, NoteListItem as NoteListItemType, Tag } from "@/lib/types";
 import { jsonResponse, mockFetch } from "@/test/fetch-mock";
 import { renderWithProviders } from "@/test/render";
 import { NOTE_LIST_PAGE_SIZE, NoteList } from "./NoteList";
-import { NOTE_LIST_BOARD_GROUP_STORAGE_KEY, NOTE_LIST_VIEW_STORAGE_KEY } from "@/lib/ui-constants";
+import { NOTE_LIST_VIEW_STORAGE_KEY } from "@/lib/ui-constants";
 
 const nbId = (c: string) => c.repeat(32);
 const noteId = (n: number) => n.toString(16).padStart(32, "0");
@@ -198,41 +198,21 @@ describe("NoteList bulk selection", () => {
 });
 
 describe("NoteList collection views & favorites", () => {
-  it("switches between List, Gallery, Table, and Board views and persists layout choice", () => {
+  it("switches between List, Gallery, Table, and Board views without to-do status groups", () => {
     localStorage.clear();
     mockFetch((c) => (c.path === "/api/tags" ? jsonResponse(tags) : undefined));
     const notes: NoteListItemType[] = [
-      ...makeNotes(2),
-      {
-        id: noteId(3),
-        title: "Pay invoice",
-        preview: "Due soon",
-        createdTime: 1_700_000_000_000,
-        updatedTime: 1_700_000_000_000,
-        parentId: nbId("1"),
-        isTodo: true,
-        todoCompleted: false,
-      },
-      {
-        id: noteId(4),
-        title: "Book flight",
-        preview: "Done",
-        createdTime: 1_700_000_000_000,
-        updatedTime: 1_700_000_000_000,
-        parentId: nbId("1"),
-        isTodo: true,
-        todoCompleted: true,
-      },
+      { ...makeNotes(2)[0], tagIds: [nbId("a")] },
+      { ...makeNotes(2)[1], tagIds: [] },
     ];
     const onSelectNote = vi.fn();
-    const onToggleTodo = vi.fn();
 
     renderWithProviders(
       <NoteList
         notes={notes}
         notebooks={notebooks}
+        tags={tags}
         onSelectNote={onSelectNote}
-        onToggleTodo={onToggleTodo}
         favoriteNoteIds={new Set([notes[0].id])}
       />
     );
@@ -240,7 +220,7 @@ describe("NoteList collection views & favorites", () => {
     // Gallery view
     fireEvent.click(screen.getByRole("button", { name: "Gallery view" }));
     expect(localStorage.getItem(NOTE_LIST_VIEW_STORAGE_KEY)).toBe("gallery");
-    expect(screen.getByText("Pay invoice")).toBeTruthy();
+    expect(screen.getByText("Note 1")).toBeTruthy();
 
     // Table view
     fireEvent.click(screen.getByRole("button", { name: "Table view" }));
@@ -249,21 +229,20 @@ describe("NoteList collection views & favorites", () => {
     expect(screen.getByRole("columnheader", { name: "Type" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "Updated" })).toBeTruthy();
 
-    // Board view groups into Open To-dos, Completed, and Notes
+    // Board view groups by tags directly, with no "Open To-dos" or "Completed" groups
     fireEvent.click(screen.getByRole("button", { name: "Board view" }));
     expect(localStorage.getItem(NOTE_LIST_VIEW_STORAGE_KEY)).toBe("board");
-    expect(screen.getByRole("heading", { level: 4, name: "Open To-dos" })).toBeTruthy();
-    expect(screen.getByRole("heading", { level: 4, name: "Completed" })).toBeTruthy();
-    expect(screen.getByRole("heading", { level: 4, name: "Notes" })).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "Toggle Pay invoice" }));
-    expect(onToggleTodo).toHaveBeenCalledWith(notes[2].id, true);
+    expect(screen.queryByRole("heading", { level: 4, name: "Open To-dos" })).toBeNull();
+    expect(screen.queryByRole("heading", { level: 4, name: "Completed" })).toBeNull();
+    expect(screen.queryByRole("group", { name: "Board grouping" })).toBeNull();
+    expect(screen.getByRole("heading", { level: 4, name: "#planning" })).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 4, name: "Untagged" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "List view" }));
     expect(localStorage.getItem(NOTE_LIST_VIEW_STORAGE_KEY)).toBe("list");
   });
 
-  it("groups Board view by Tags cleanly and persists grouping mode", () => {
+  it("groups Board view by Tags cleanly", () => {
     localStorage.clear();
     mockFetch((c) => (c.path === "/api/tags" ? jsonResponse(tags) : undefined));
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -299,11 +278,6 @@ describe("NoteList collection views & favorites", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Board view" }));
-    expect(screen.getByRole("button", { name: "Status" }).getAttribute("aria-pressed")).toBe("true");
-
-    fireEvent.click(screen.getByRole("button", { name: "Tags" }));
-    expect(localStorage.getItem(NOTE_LIST_BOARD_GROUP_STORAGE_KEY)).toBe("tags");
-    expect(screen.getByRole("button", { name: "Tags" }).getAttribute("aria-pressed")).toBe("true");
 
     const planningHeading = screen.getByRole("heading", { level: 4, name: "#planning" });
     const readingHeading = screen.getByRole("heading", { level: 4, name: "#reading" });

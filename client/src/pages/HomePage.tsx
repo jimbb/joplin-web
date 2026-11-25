@@ -123,7 +123,7 @@ export function HomePage() {
       toast.success(isTodo ? "To-do created" : "Note created", {
         action: {
           label: "Open",
-          onClick: () => navigate(`/notes/${created.id}`),
+          onClick: () => navigate(isTodo ? `/tasks/${created.id}` : `/notes/${created.id}`),
         },
       });
     } catch (err) {
@@ -447,7 +447,7 @@ export function HomePage() {
                 {favoriteNotes.map((note) => (
                   <Link
                     key={`fav-note-${note.id}`}
-                    to={`/notes/${note.id}`}
+                    to={note.isTodo ? `/tasks/${note.id}` : `/notes/${note.id}`}
                     className="flex items-center gap-2.5 rounded-lg border border-border/70 bg-background px-3 py-2 text-sm hover:border-primary/50 hover:bg-accent/40 transition-colors min-w-0"
                   >
                     <FileText className="h-4 w-4 shrink-0 text-amber-500" aria-hidden="true" />
@@ -606,7 +606,7 @@ export function HomePage() {
                 {openTodoNotes.slice(0, 4).map((todo) => (
                   <Link
                     key={`todo-${todo.id}`}
-                    to={`/notes/${todo.id}`}
+                    to={`/tasks/${todo.id}`}
                     className="flex items-center justify-between gap-2 rounded-lg border border-border/60 bg-background px-3 py-2 text-xs hover:bg-accent/40 transition-colors"
                   >
                     <span className="truncate font-medium text-foreground">{noteDisplayTitle(todo)}</span>
@@ -616,7 +616,7 @@ export function HomePage() {
                 {openInlineTasks.slice(0, Math.max(0, 6 - Math.min(4, openTodoNotes.length))).map((item) => (
                   <Link
                     key={`inline-${item.noteId}-${item.line}-${item.column}`}
-                    to={`/notes/${item.noteId}`}
+                    to={`/tasks/${item.noteId}?line=${item.line}`}
                     className="flex items-center justify-between gap-2 rounded-lg border border-border/60 bg-background px-3 py-2 text-xs hover:bg-accent/40 transition-colors"
                   >
                     <span className="truncate text-foreground">{item.text}</span>

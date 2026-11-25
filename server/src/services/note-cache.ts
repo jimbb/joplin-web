@@ -862,10 +862,11 @@ export class NoteCacheService {
       (nb) => !nb.deletedTime || nb.deletedTime === 0
     );
 
-    // Direct active notes per notebook, counted in one pass over all notes
+    // Direct active regular notes per notebook (excluding trashed, conflicts, and to-dos)
+    const deletedNotebookIds = this.deletedNotebookIdsOf(entry);
     const noteCounts = new Map<string, number>();
     for (const note of entry.notes.values()) {
-      if ((note.deletedTime && note.deletedTime > 0) || isConflictNote(note)) continue;
+      if (!this.isListedNote(note, deletedNotebookIds)) continue;
       noteCounts.set(note.parentId, (noteCounts.get(note.parentId) ?? 0) + 1);
     }
 
@@ -1015,13 +1016,9 @@ export class NoteCacheService {
           (n.parentId && deletedNotebookIds.has(n.parentId) && !isConflictNote(n))
       );
     } else {
-      // Active notes: note itself has no deletedTime AND parent notebook is not deleted
-      matchingNotes = matchingNotes.filter(
-        (n) =>
-          (!n.deletedTime || n.deletedTime === 0) &&
-          (!n.parentId || !deletedNotebookIds.has(n.parentId)) &&
-          !isConflictNote(n)
-      );
+      // Active regular notes: not trashed, not in a trashed notebook, not a conflict copy, not a to-do
+      // (to-do notes live in the Tasks Hub via GET /api/tasks)
+      matchingNotes = matchingNotes.filter((n) => this.isListedNote(n, deletedNotebookIds));
     }
 
     // Filter by notebook if specified
@@ -1144,16 +1141,11 @@ export class NoteCacheService {
         .map((nb) => nb.id)
     );
 
-    // Distinct active notes per tag, collected in one pass over the links
+    // Distinct active regular notes per tag (excluding trashed, conflicts, and to-dos)
     const notesPerTag = new Map<string, Set<string>>();
     for (const link of entry.noteTags) {
       const note = entry.notes.get(link.noteId);
-      if (
-        !note ||
-        isConflictNote(note) ||
-        (note.deletedTime && note.deletedTime > 0) ||
-        (note.parentId && deletedNotebookIds.has(note.parentId))
-      ) {
+      if (!note || !this.isListedNote(note, deletedNotebookIds)) {
         continue;
       }
       let noteIds = notesPerTag.get(link.tagId);
@@ -1514,6 +1506,14 @@ export class NoteCacheService {
     );
   }
 
+  /**
+   * Active regular note shown in Notes lists (All Notes, notebooks, tags, Recent/Home) and counted
+   * in sidebar notebook/tag counts. Joplin to-do notes live only in the Tasks Hub.
+   */
+  private isListedNote(note: RawJoplinItem, deletedNotebookIds: Set<string>): boolean {
+    return !note.isTodo && this.isNoteActive(note, deletedNotebookIds);
+  }
+
   private tagIdsByNoteOf(entry: CacheEntry): Map<string, string[]> {
     const map = new Map<string, string[]>();
     for (const link of entry.noteTags) {
@@ -1616,7 +1616,7 @@ export class NoteCacheService {
     const noteCounts = new Map<string, number>();
     if (prefs.favoriteNotebookIds.length > 0) {
       for (const note of entry.notes.values()) {
-        if (this.isNoteActive(note, deletedNotebookIds)) {
+        if (this.isListedNote(note, deletedNotebookIds)) {
           noteCounts.set(note.parentId, (noteCounts.get(note.parentId) ?? 0) + 1);
         }
       }
@@ -1663,7 +1663,7 @@ export class NoteCacheService {
     for (const r of recentReads) {
       if (recentRead.length >= capped) break;
       const note = entry.notes.get(r.noteId);
-      if (note && this.isNoteActive(note, deletedNotebookIds)) {
+      if (note && this.isListedNote(note, deletedNotebookIds)) {
         recentRead.push({
           ...this.toNoteListItem(entry, note, tagIdsByNote),
           readAt: r.readAt,
@@ -1673,7 +1673,7 @@ export class NoteCacheService {
 
     const activeNotes: RawJoplinItem[] = [];
     for (const note of entry.notes.values()) {
-      if (this.isNoteActive(note, deletedNotebookIds)) activeNotes.push(note);
+      if (this.isListedNote(note, deletedNotebookIds)) activeNotes.push(note);
     }
     activeNotes.sort((a, b) => b.createdTime - a.createdTime || b.updatedTime - a.updatedTime);
 

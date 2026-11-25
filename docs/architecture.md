@@ -148,15 +148,15 @@ All routes except `/api/health`, `/api/auth/login`, `/api/auth/logout`, the pend
 | `DELETE` | `/api/auth/2fa/trusted-devices` | Revokes all trusted devices for the user and clears the trusted-device cookie (full session + step-up) |
 | `DELETE` | `/api/auth/2fa/trusted-devices/:id` | Revokes one trusted device (full session + step-up; clears cookie if current) |
 | `GET` | `/api/account/write-state` | `{ writable: true }`, or `{ writable: false, reason }` when the account is read-only (E2EE); same check as every write |
-| `GET` | `/api/notebooks` | Nested notebook tree with note counts |
+| `GET` | `/api/notebooks` | Nested notebook tree with active regular note counts (excluding to-dos and conflict copies) |
 | `GET` | `/api/notebooks/trash` | Trashed notebooks (top of each trashed subtree) with note and sub-notebook counts |
 | `POST` | `/api/notebooks/refresh` | Forces a cache re-sync |
 | `POST` | `/api/notebooks` | Create notebook `{ title, parentId }` |
 | `PUT` | `/api/notebooks/:id` | Rename / move notebook |
 | `DELETE` | `/api/notebooks/:id` | Trash notebook; `?permanent=true` deletes a trashed one |
 | `POST` | `/api/notebooks/:id/restore` | Restore a trashed notebook with its contents |
-| `GET` | `/api/notes` | List; filters `notebook_id`, `tag_id`, `is_trash`; `is_conflict=true` lists only conflict copies (other filters ignored). Items carry `isConflict` and `tagIds`. |
-| `GET` | `/api/notes/recent` | `{ recentRead, recentCreated }` mixing tracked `recentReads` from `PreferencesStore` and active notes ordered by `createdTime` (supports `?limit=1..100`, default `50`) |
+| `GET` | `/api/notes` | List active regular notes (excluding to-dos, which live in `/api/tasks`); filters `notebook_id`, `tag_id`, `is_trash` (trash includes trashed to-dos); `is_conflict=true` lists only conflict copies (other filters ignored). Items carry `isConflict` and `tagIds`. |
+| `GET` | `/api/notes/recent` | `{ recentRead, recentCreated }` mixing tracked `recentReads` from `PreferencesStore` and active regular notes (excluding to-dos) ordered by `createdTime` (supports `?limit=1..100`, default `50`) |
 | `GET` | `/api/notes/:id` | Note with body, list `preview`, notebook, `notebookPath` ancestor breadcrumbs, incoming `backlinks`, tags, `properties`, and `markupLanguage` (1 = Markdown, 2 = HTML; the write routes below return the same shape); `isConflict` / `conflictOriginalId` for conflict copies |
 | `POST` | `/api/notes` | Create `{ title, body, parentId, isTodo }` |
 | `PUT` | `/api/notes/:id` | Update `{ title, body, parentId, todoCompleted, todoDue, baseUpdatedTime, force }`; `todoDue` is Unix ms (`0`/`null` clears it, only to-dos can have one) |
@@ -179,7 +179,7 @@ All routes except `/api/health`, `/api/auth/login`, `/api/auth/logout`, the pend
 | `POST` | `/api/notes/:id/restore` | Restore from trash |
 | `POST` | `/api/notes/:id/tags` | Add tag by title `{ title }` |
 | `DELETE` | `/api/notes/:id/tags/:tagId` | Remove tag from note |
-| `GET` | `/api/tags` | Tags with note counts |
+| `GET` | `/api/tags` | Tags with active regular note counts (excluding to-dos and conflict copies) |
 | `PUT` | `/api/tags/:id` | Rename tag |
 | `DELETE` | `/api/tags/:id` | Delete tag and its links |
 | `GET` | `/api/search?q=` | Search over active notes (see *Search syntax*); each result has `matches: { inTitle, inBody, matchedIn?, snippet, terms }` |

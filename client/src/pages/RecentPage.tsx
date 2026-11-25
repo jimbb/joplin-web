@@ -295,6 +295,7 @@ export function RecentPage() {
             note={selectedNoteId ? noteQuery.data : null}
             notebooks={notebooks}
             readOnly={readOnly}
+            openInTasksTo={noteQuery.data?.isTodo ? `/tasks/${noteQuery.data.id}` : undefined}
             isLoading={Boolean(selectedNoteId && noteQuery.isLoading)}
             error={noteQuery.data ? null : noteQuery.error}
             isStale={Boolean(noteQuery.data && noteQuery.isError)}

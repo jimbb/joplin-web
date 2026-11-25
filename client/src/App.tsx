@@ -220,6 +220,14 @@ export function App() {
                   }
                 />
                 <Route
+                  path="/tasks/:id"
+                  element={
+                    <ProtectedRoute>
+                      <TasksPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
                   path="/hygiene"
                   element={
                     <ProtectedRoute>

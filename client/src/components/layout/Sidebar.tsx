@@ -656,7 +656,8 @@ export function Sidebar({
                         <button
                           type="button"
                           onClick={() => {
-                            if (onOpenNote) onOpenNote(note.id);
+                            if (note.isTodo) navigate(`/tasks/${note.id}`);
+                            else if (onOpenNote) onOpenNote(note.id);
                             else navigate(`/notes/${note.id}`);
                             onCloseMobile?.();
                           }}

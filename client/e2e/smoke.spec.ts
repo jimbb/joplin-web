@@ -283,6 +283,71 @@ test("navigates on a phone between menu, list and note @phone", async ({ page })
   await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-travel")}$`));
 });
 
+test("keeps to-dos out of Notes lists, opens a task in the Tasks Hub pane, toggles it complete, and goes back", async ({
+  page,
+}) => {
+  await signIn(page);
+  const sidebar = page.getByRole("complementary").first();
+
+  // All Notes excludes Joplin to-do notes, while regular notes with checklists stay
+  await expect(listedNote(page, "Website Relaunch Roadmap")).toBeVisible();
+  await expect(listedNote(page, "Renew passport")).toHaveCount(0);
+  await expect(listedNote(page, "Pay the electricity bill")).toHaveCount(0);
+  await expect(listedNote(page, "Book train tickets to Porto")).toHaveCount(0);
+
+  // Search still finds to-dos, opens them on /notes/:id, and shows an Open in Tasks link
+  await page.getByRole("searchbox", { name: "Search notes" }).fill("Renew passport");
+  await expect(page.getByText("1 found")).toBeVisible();
+  await page.getByRole("button", { name: /Renew passport/ }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Renew passport" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open in Tasks" })).toBeVisible();
+  await page.getByRole("button", { name: "Clear search" }).first().click();
+
+  // Open Tasks Hub, select a task in the split pane, toggle it complete in the pane, and navigate back
+  await sidebar.getByRole("button", { name: "Tasks", exact: true }).click();
+  await expect(page).toHaveURL(/\/tasks$/);
+  await page.getByRole("link", { name: "Renew passport" }).click();
+  await expect(page).toHaveURL(new RegExp(`/tasks/${demoId("note-todo-passport")}$`));
+  await expect(page.getByRole("heading", { level: 1, name: "Renew passport" })).toBeVisible();
+
+  // Mark done in the pane -> list updates immediately
+  await page.getByRole("button", { name: "To do: mark as done" }).click();
+  await expect(page.getByRole("button", { name: "Done: mark as not done" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Renew passport" })).toHaveCount(0);
+
+  // Restore to open so demo seed state stays clean
+  await page.getByRole("button", { name: "Done: mark as not done" }).click();
+  await expect(page.getByRole("button", { name: "To do: mark as done" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Renew passport" })).toBeVisible();
+
+  await page.goBack();
+  await expect(page).toHaveURL(/\/tasks$/);
+});
+
+test("opens a task in Tasks Hub on a phone, toggles it complete, and goes back @phone", async ({ page }) => {
+  await signIn(page);
+
+  await page.getByRole("button", { name: "Toggle navigation menu" }).click();
+  const menu = page.getByRole("dialog", { name: "Navigation Menu" });
+  await menu.getByRole("button", { name: "Tasks", exact: true }).click();
+  await expect(menu).toBeHidden();
+  await expect(page).toHaveURL(/\/tasks$/);
+
+  await page.getByRole("link", { name: "Renew passport" }).click();
+  await expect(page).toHaveURL(new RegExp(`/tasks/${demoId("note-todo-passport")}$`));
+  await expect(page.getByRole("heading", { level: 1, name: "Renew passport" })).toBeVisible();
+  await expect(page.getByLabel("Filter tasks")).toBeHidden();
+
+  await page.getByRole("button", { name: "To do: mark as done" }).click();
+  await expect(page.getByRole("button", { name: "Done: mark as not done" })).toBeVisible();
+  await page.getByRole("button", { name: "Done: mark as not done" }).click();
+  await expect(page.getByRole("button", { name: "To do: mark as done" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Close note view" }).click();
+  await expect(page).toHaveURL(/\/tasks$/);
+  await expect(page.getByLabel("Filter tasks")).toBeVisible();
+});
+
 test("a long notebook name truncates and keeps its note count inside the sidebar", async ({ page }) => {
   await signIn(page);
   // Cookie-authenticated writes need the page's Origin, like the browser sends (CSRF check)

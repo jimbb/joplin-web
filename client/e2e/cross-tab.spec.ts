@@ -19,7 +19,7 @@ test("syncs sidebar tags, notebook counts and notes across tabs without reload",
   const sidebar2 = otherTab.getByRole("complementary").first();
 
   await expect(sidebar2.getByRole("button", { name: /^Reading List\s*, 3 notes$/ })).toBeVisible();
-  await expect(sidebar2.getByRole("button", { name: /^Travel\s*, 2 notes$/ })).toBeVisible();
+  await expect(sidebar2.getByRole("button", { name: /^Travel\s*, 1 note$/ })).toBeVisible();
   await expect(sidebar2.getByRole("button", { name: /^cooking\s*, 2 notes$/ })).toBeVisible();
 
   // Bring focus back to the first tab cleanly before writing there
@@ -61,9 +61,9 @@ test("syncs sidebar tags, notebook counts and notes across tabs without reload",
   await page.getByRole("menuitem", { name: "Move to notebook" }).hover();
   await page.getByRole("menuitem", { name: "Travel" }).click();
   await expect(sidebar1.getByRole("button", { name: /^Reading List\s*, 3 notes$/ })).toBeVisible();
-  await expect(sidebar1.getByRole("button", { name: /^Travel\s*, 3 notes$/ })).toBeVisible();
+  await expect(sidebar1.getByRole("button", { name: /^Travel\s*, 2 notes$/ })).toBeVisible();
   await expect(sidebar2.getByRole("button", { name: /^Reading List\s*, 3 notes$/ })).toBeVisible();
-  await expect(sidebar2.getByRole("button", { name: /^Travel\s*, 3 notes$/ })).toBeVisible();
+  await expect(sidebar2.getByRole("button", { name: /^Travel\s*, 2 notes$/ })).toBeVisible();
 
   // 4. Edit title via editor ("Done" saves through use-note-saver)
   await page.getByRole("button", { name: "Edit", exact: true }).click();
@@ -86,7 +86,7 @@ test("syncs sidebar tags, notebook counts and notes across tabs without reload",
   await page.getByRole("menuitem", { name: "Delete tag" }).click();
   await page.getByRole("dialog").getByRole("button", { name: "Delete tag" }).click();
 
-  await expect(sidebar2.getByRole("button", { name: /^Travel\s*, 2 notes$/ })).toBeVisible();
+  await expect(sidebar2.getByRole("button", { name: /^Travel\s*, 1 note$/ })).toBeVisible();
   await expect(sidebar2.getByRole("button", { name: /^cooking\s*, 2 notes$/ })).toBeVisible();
   await expect(sidebar2.getByRole("button", { name: new RegExp(`^${tag}\\b`) })).toHaveCount(0);
 });
