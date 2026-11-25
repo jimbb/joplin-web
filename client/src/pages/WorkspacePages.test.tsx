@@ -613,35 +613,44 @@ describe("TasksPage", () => {
 });
 
 describe("HygienePage", () => {
-  it("displays hygiene clusters, trashes duplicates & empty notes, and triggers Auto-organize for untagged notes", async () => {
+  it("displays tiered hygiene clusters, trashes duplicates & empty notes, and triggers Auto-organize for untagged notes", async () => {
     const calls = mockBaseWorkspace((call) => {
       if (call.path === "/api/organize/hygiene") {
         return jsonResponse({
           duplicateClusters: [
             {
-              id: "cluster-1",
-              reason: "exact-title",
+              id: "identical-1",
+              tier: "identical",
               score: 1,
+              evidence: "Identical text (48 words)",
+              suggestedKeeperId: noteAId,
               notes: [
                 {
                   id: noteAId,
                   title: "Meeting Notes",
                   notebookTitle: "Work",
+                  notebookPath: "Work",
                   preview: "Notes from Monday",
                   previewLength: 17,
                   updatedTime: 2000,
+                  tags: [{ id: id("7"), title: "planning" }],
                 },
                 {
                   id: noteBId,
-                  title: "Meeting Notes",
-                  notebookTitle: "Inbox",
-                  preview: "Old duplicate",
-                  previewLength: 13,
+                  title: "Imported Copy",
+                  notebookTitle: "Pending to sort",
+                  notebookPath: "Pending to sort",
+                  preview: "Notes from Monday",
+                  previewLength: 17,
                   updatedTime: 1000,
+                  tags: [{ id: id("8"), title: "archive" }],
                 },
               ],
             },
           ],
+          totalDuplicateClusters: 1,
+          identicalClusterCount: 1,
+          nearClusterCount: 0,
           emptyNotes: [{ id: noteCId, title: "Blank Scratch", notebookTitle: "Inbox", updatedTime: 500 }],
           untaggedNotes: [{ id: noteAId, title: "Meeting Notes", notebookTitle: "Work", updatedTime: 2000 }],
         });
@@ -650,7 +659,7 @@ describe("HygienePage", () => {
         return jsonResponse(null, 204);
       }
       if (call.method === "POST" && call.path === "/api/notes/batch") {
-        return jsonResponse([{ id: noteCId, ok: true }]);
+        return jsonResponse([{ id: noteCId, status: "ok" }]);
       }
       if (call.method === "POST" && call.path === "/api/organize/jobs") {
         return jsonResponse({ jobId: "job-99" }, 201);
@@ -670,6 +679,8 @@ describe("HygienePage", () => {
     );
 
     expect(await screen.findByText("Possible Duplicates (1)")).toBeTruthy();
+    expect(screen.getByText("Identical text (48 words)")).toBeTruthy();
+    expect(screen.getByText("Suggested keeper")).toBeTruthy();
     expect(screen.getByText("Empty Notes (1)")).toBeTruthy();
     expect(screen.getByText("Untagged Notes (1)")).toBeTruthy();
 
@@ -692,6 +703,214 @@ describe("HygienePage", () => {
       expect(calls.some((c) => c.method === "POST" && c.path === "/api/organize/jobs")).toBe(true)
     );
     expect(screen.getByTestId("location").textContent).toBe("/organize/job-99");
+  });
+
+  it("opens side-by-side compare dialog with word diff, supports resolve with tag merge, dismiss, and bulk identical trash", async () => {
+    const resAId = id("5");
+    const resBId = id("6");
+    const noteDId = id("d");
+
+    const calls = mockBaseWorkspace((call) => {
+      if (call.path === "/api/organize/hygiene") {
+        return jsonResponse({
+          duplicateClusters: [
+            {
+              id: "identical-cluster",
+              tier: "identical",
+              score: 1,
+              evidence: "Same attachment (312 KB) and identical OCR text",
+              suggestedKeeperId: noteAId,
+              notes: [
+                {
+                  id: noteAId,
+                  title: "2024-04-01 Thames Water Bill",
+                  notebookTitle: "Utilities",
+                  notebookPath: "Home / Utilities",
+                  preview: "",
+                  createdTime: 1000,
+                  updatedTime: 2000,
+                  tags: [{ id: id("7"), title: "utilities" }],
+                  attachments: [{ id: resAId, name: "water.pdf", mime: "application/pdf", size: 319488, kind: "pdf", hasOcr: true }],
+                },
+                {
+                  id: noteBId,
+                  title: "Scan_20240402.pdf",
+                  notebookTitle: "Pending to sort",
+                  notebookPath: "Pending to sort",
+                  preview: "",
+                  createdTime: 3000,
+                  updatedTime: 4000,
+                  tags: [{ id: id("8"), title: "tax-2024" }],
+                  attachments: [{ id: resBId, name: "scan.pdf", mime: "application/pdf", size: 319488, kind: "pdf", hasOcr: true }],
+                },
+              ],
+            },
+            {
+              id: "near-cluster",
+              tier: "near",
+              score: 0.96,
+              evidence: "96% same text, same dates/amounts",
+              suggestedKeeperId: noteCId,
+              notes: [
+                {
+                  id: noteCId,
+                  title: "Annual Statement",
+                  notebookTitle: "Finance",
+                  notebookPath: "Finance",
+                  preview: "Total GBP 486.20",
+                  createdTime: 1000,
+                  updatedTime: 2000,
+                  tags: [],
+                },
+                {
+                  id: noteDId,
+                  title: "Annual Statement Rescan",
+                  notebookTitle: "Pending to sort",
+                  notebookPath: "Pending to sort",
+                  preview: "Total GBP 486.20",
+                  createdTime: 3000,
+                  updatedTime: 4000,
+                  tags: [],
+                },
+              ],
+            },
+          ],
+          totalDuplicateClusters: 2,
+          identicalClusterCount: 1,
+          nearClusterCount: 1,
+          emptyNotes: [],
+          untaggedNotes: [],
+        });
+      }
+      if (call.path === `/api/notes/${noteAId}`) {
+        return jsonResponse({
+          ...sampleNoteA,
+          id: noteAId,
+          title: "2024-04-01 Thames Water Bill",
+          body: `[water.pdf](:/${resAId})`,
+          notebookTitle: "Utilities",
+          notebookPath: [
+            { id: id("1"), title: "Home" },
+            { id: id("2"), title: "Utilities" },
+          ],
+          tags: [{ id: id("7"), title: "utilities" }],
+        });
+      }
+      if (call.path === `/api/notes/${noteBId}`) {
+        return jsonResponse({
+          ...sampleNoteA,
+          id: noteBId,
+          title: "Scan_20240402.pdf",
+          body: `[scan.pdf](:/${resBId})`,
+          notebookTitle: "Pending to sort",
+          notebookPath: [{ id: id("3"), title: "Pending to sort" }],
+          tags: [{ id: id("8"), title: "tax-2024" }],
+        });
+      }
+      if (call.path === `/api/notes/${noteAId}/attachments`) {
+        return jsonResponse([
+          {
+            id: resAId,
+            title: "water.pdf",
+            filename: "water.pdf",
+            mime: "application/pdf",
+            fileExtension: "pdf",
+            size: 319488,
+            updatedTime: 2000,
+            kind: "pdf",
+            ocrStatus: "done",
+            ocrText: "THAMES WATER LIMITED Total GBP 486.20",
+          },
+        ]);
+      }
+      if (call.path === `/api/notes/${noteBId}/attachments`) {
+        return jsonResponse([
+          {
+            id: resBId,
+            title: "scan.pdf",
+            filename: "scan.pdf",
+            mime: "application/pdf",
+            fileExtension: "pdf",
+            size: 319488,
+            updatedTime: 4000,
+            kind: "pdf",
+            ocrStatus: "done",
+            ocrText: "THAMES WATER LlMITED Total GBP 486.20",
+          },
+        ]);
+      }
+      if (call.method === "POST" && call.path === "/api/organize/hygiene/resolve") {
+        return jsonResponse({
+          keepNoteId: noteAId,
+          trashedNoteIds: [noteBId],
+          mergedTags: ["tax-2024"],
+          results: [{ id: noteBId, status: "ok" }],
+        });
+      }
+      if (call.method === "POST" && call.path === "/api/organize/hygiene/dismiss") {
+        return jsonResponse({ dismissedCount: 1, dismissedPairs: [`${noteCId}:${noteDId}`] });
+      }
+      if (call.method === "POST" && call.path === "/api/notes/batch") {
+        const body = (call.body ?? {}) as { items?: Array<{ id: string }> };
+        return jsonResponse((body.items ?? []).map((item) => ({ id: item.id, status: "ok", addedTags: [] })));
+      }
+      return undefined;
+    });
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/hygiene" element={<HygienePage />} />
+      </Routes>,
+      { route: "/hygiene" }
+    );
+
+    expect(await screen.findByText("Possible Duplicates (2)")).toBeTruthy();
+
+    // Open Compare on the first cluster
+    const compareButtons = screen.getAllByRole("button", { name: "Compare" });
+    fireEvent.click(compareButtons[0]);
+
+    // Verify side-by-side panes and OCR word diff render
+    expect(await screen.findByTestId("compare-pane-left")).toBeTruthy();
+    expect(screen.getByTestId("compare-pane-right")).toBeTruthy();
+    const diffBox = await screen.findByTestId("compare-word-diff");
+    await waitFor(() => expect(diffBox.textContent).toContain("LlMITED"));
+
+    // Resolve cluster (mergeTags checkbox defaults to true)
+    fireEvent.click(screen.getByRole("button", { name: "Keep left, trash other" }));
+    await waitFor(() => {
+      const resolveCall = calls.find((c) => c.method === "POST" && c.path === "/api/organize/hygiene/resolve");
+      expect(resolveCall).toBeTruthy();
+      expect(resolveCall!.body).toEqual({
+        keepNoteId: noteAId,
+        trashNoteIds: [noteBId],
+        mergeTags: true,
+      });
+    });
+
+    // Dismiss the near cluster as "Not duplicates"
+    const dismissButtons = screen.getAllByRole("button", { name: "Not duplicates" });
+    fireEvent.click(dismissButtons[1]);
+    await waitFor(() => {
+      const dismissCall = calls.find((c) => c.method === "POST" && c.path === "/api/organize/hygiene/dismiss");
+      expect(dismissCall).toBeTruthy();
+      expect(dismissCall!.body).toEqual({ noteIds: [noteCId, noteDId] });
+    });
+
+    // Bulk trash identical copies only (shows confirmation with exact count = 1, never touches near cluster)
+    fireEvent.click(screen.getByRole("button", { name: /Trash all identical copies \(1\)/ }));
+    expect(await screen.findByText("Trash all identical copies?")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Trash 1 identical copy" }));
+    await waitFor(() => {
+      const trashCall = calls.find((c) => {
+        if (c.method !== "POST" || c.path !== "/api/notes/batch") return false;
+        const parsed = (c.body ?? {}) as { trash?: boolean };
+        return parsed.trash === true;
+      });
+      expect(trashCall).toBeTruthy();
+      const parsed = (trashCall!.body ?? {}) as { items: Array<{ id: string }> };
+      expect(parsed.items.map((i) => i.id)).toEqual([noteBId]);
+    });
   });
 });
 
