@@ -91,6 +91,7 @@ interface NoteListProps {
   onBulkAddTag?: (notes: NoteListItemType[], tagTitle: string) => void;
   onBulkTrash?: (notes: NoteListItemType[]) => void;
   onAutoOrganize?: (notes: NoteListItemType[], defaultExcludedNotebookId: string | null) => void;
+  onAutoRetitle?: (notes: NoteListItemType[], defaultExcludedNotebookId: string | null) => void;
   isBulkPending?: boolean;
   bulkProgress?: BulkUpdateProgress | null;
   favoriteNoteIds?: ReadonlySet<string>;
@@ -195,6 +196,7 @@ export function NoteList({
   onBulkAddTag,
   onBulkTrash,
   onAutoOrganize,
+  onAutoRetitle,
   isBulkPending = false,
   bulkProgress = null,
   favoriteNoteIds,
@@ -1122,6 +1124,12 @@ export function NoteList({
               >
                 <Sparkles className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
                 Auto-organize
+              </Button>
+            )}
+            {canAutoOrganize && onAutoRetitle && (
+              <Button type="button" variant="outline" size="sm" disabled={isBulkPending} onClick={() => onAutoRetitle(selectedNotes, uniformCurrentNotebookId)} className="h-8 gap-1.5 px-2.5 text-xs flex-1 min-w-[6.75rem]">
+                <Sparkles className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
+                Auto-retitle
               </Button>
             )}
 

@@ -23,6 +23,8 @@ import { AppLayout } from "@/components/layout/AppLayout";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { NotebookPicker } from "@/components/notebooks/NotebookPicker";
 import { TagAutocompleteInput } from "@/components/tags/TagAutocompleteInput";
+import { NewOrganizeJobDialog } from "@/components/organize/NewOrganizeJobDialog";
+import { StartOrganizeDialog } from "@/components/organize/StartOrganizeDialog";
 import { ConfirmDialog } from "@/components/common/Dialogs";
 import { QueryError } from "@/components/common/QueryError";
 import { Badge } from "@/components/ui/badge";
@@ -43,12 +45,13 @@ import {
   useApplyOrganizeJob,
   useCancelOrganizeJob,
   useDeleteOrganizeJob,
+  useCreateOrganizeJob,
   useOrganizeJob,
   useOrganizeJobs,
   useRetryOrganizeJob,
   useUndoOrganizeJob,
 } from "@/hooks/use-organize";
-import { getOrganizeTargets } from "@/lib/api";
+import { getOrganizeRunningJobId, getOrganizeTargets, previewOrganizeJob } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/format";
 import { buildNotebookPathMap } from "@/lib/notebooks";
 import {
@@ -76,6 +79,13 @@ interface RowEdit {
   title?: string;
   notebookId?: string;
   tags?: string[];
+}
+
+interface NewJobScope {
+  sourceNotebookIds: string[];
+  includeSubNotebooks: boolean;
+  mode: "organize" | "retitle";
+  matched: number;
 }
 
 function noteUrlForItem(item: OrganizeJobItem): string {
@@ -125,6 +135,9 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
   const [openTagRow, setOpenTagRow] = useState<string | null>(null);
   const [tagDraft, setTagDraft] = useState("");
   const [jobToDelete, setJobToDelete] = useState<OrganizeJobSummary | null>(null);
+  const [newJobOpen, setNewJobOpen] = useState(false);
+  const [newJobScope, setNewJobScope] = useState<NewJobScope | null>(null);
+  const [newJobConflict, setNewJobConflict] = useState<{ runningJobId: string; message: string } | null>(null);
   const seenItemsRef = useRef<Map<string, OrganizeJobItem>>(new Map());
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
@@ -139,13 +152,59 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
 
   const jobQuery = useOrganizeJob(jobId, { offset, limit: ORGANIZE_PAGE_SIZE, filter });
   const { data: job, isLoading, error } = jobQuery;
+  const isRetitle = job?.mode === "retitle";
+  useEffect(() => {
+    if (isRetitle && filter === "moves") setFilter("all");
+  }, [isRetitle, filter]);
 
   const cancelMutation = useCancelOrganizeJob(jobId);
   const deleteMutation = useDeleteOrganizeJob();
+  const createMutation = useCreateOrganizeJob();
+  const cancelRunningMutation = useCancelOrganizeJob();
   const retryMutation = useRetryOrganizeJob(jobId);
   const applyMutation = useApplyOrganizeJob(jobId);
   const undoMutation = useUndoOrganizeJob(jobId);
   const isMutating = isPreparingApply || applyMutation.isPending || undoMutation.isPending;
+
+  const previewNewJob = async (input: { sourceNotebookIds?: string[]; mode: "organize" | "retitle"; includeSubNotebooks: boolean }) => {
+    try {
+      const sourceNotebookIds = input.sourceNotebookIds ?? [];
+      const result = await previewOrganizeJob({ sourceNotebookIds, includeSubNotebooks: input.includeSubNotebooks, mode: input.mode });
+      setNewJobOpen(false);
+      setNewJobConflict(null);
+      setNewJobScope({ ...input, sourceNotebookIds, matched: result.matched });
+    } catch (err) {
+      toast.error("Could not check AI job scope", { description: err instanceof Error ? err.message : undefined });
+    }
+  };
+
+  const startNewJob = async (excludeNotebookIds: string[]) => {
+    if (!newJobScope) return;
+    try {
+      const result = await createMutation.mutateAsync({
+        sourceNotebookIds: newJobScope.sourceNotebookIds,
+        includeSubNotebooks: newJobScope.includeSubNotebooks,
+        mode: newJobScope.mode,
+        ...(newJobScope.mode === "organize" ? { excludeNotebookIds } : {}),
+      });
+      setNewJobScope(null);
+      setNewJobConflict(null);
+      navigate(`/organize/${result.jobId}`);
+    } catch (err) {
+      const runningJobId = getOrganizeRunningJobId(err);
+      if (runningJobId) {
+        setNewJobConflict({ runningJobId, message: err instanceof Error ? err.message : "Another AI job is currently running." });
+        return;
+      }
+      toast.error("Could not start AI job", { description: err instanceof Error ? err.message : undefined });
+    }
+  };
+
+  const cancelAndStartNewJob = async (runningJobId: string, excludeNotebookIds: string[]) => {
+    await cancelRunningMutation.mutateAsync(runningJobId);
+    setNewJobConflict(null);
+    await startNewJob(excludeNotebookIds);
+  };
 
   const notebookPathById = useMemo(() => buildNotebookPathMap(notebooks), [notebooks]);
   const excludedNotebookSet = useMemo(
@@ -194,7 +253,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
   };
 
   const computeBaseSelected = useCallback((item: OrganizeJobItem, mode: ActiveSelectionMode): boolean => {
-    if (item.status !== "done" || !item.suggestion || item.applied || item.gone) return false;
+    if (item.status !== "done" || !item.suggestion || item.unchanged || item.applied || item.gone) return false;
     if (mode === "very-high") return item.suggestion.confidence >= VERY_HIGH_CONFIDENCE_THRESHOLD;
     if (mode === "high") return item.suggestion.confidence >= HIGH_CONFIDENCE_THRESHOLD;
     return false;
@@ -202,7 +261,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
 
   const isRowChecked = useCallback(
     (item: OrganizeJobItem): boolean => {
-      if (item.status !== "done" || !item.suggestion || item.applied || item.gone) return false;
+      if (item.status !== "done" || !item.suggestion || item.unchanged || item.applied || item.gone) return false;
       const ov = selectionOverrides[item.noteId];
       if (ov !== undefined) return ov.checked;
       return computeBaseSelected(item, selectionMode);
@@ -217,7 +276,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
       for (const [noteId, edit] of Object.entries(edits)) {
         if (edit.notebookId === undefined) continue;
         const item = itemsById.get(noteId) ?? seenItemsRef.current.get(noteId);
-        if (!item || item.status !== "done" || !item.suggestion) continue;
+        if (!item || item.status !== "done" || !item.suggestion || item.unchanged) continue;
         const serverMove = Boolean(item.suggestion.notebookId && item.suggestion.notebookId !== item.currentNotebookId);
         const localMove = Boolean(edit.notebookId && edit.notebookId !== item.currentNotebookId);
         if (localMove !== serverMove) {
@@ -244,7 +303,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
     let moves = 0;
     let movesUnapplied = 0;
     for (const item of items) {
-      if (item.status !== "done" || !item.suggestion) continue;
+      if (item.status !== "done" || !item.suggestion || item.unchanged) continue;
       const isVeryHigh = item.suggestion.confidence >= VERY_HIGH_CONFIDENCE_THRESHOLD;
       const isHigh = item.suggestion.confidence >= HIGH_CONFIDENCE_THRESHOLD;
       const targetNb = edits[item.noteId]?.notebookId ?? item.suggestion.notebookId;
@@ -316,16 +375,16 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
     if (filter === "all") return items;
     if (filter === "very-high") {
       return items.filter(
-        (item) => item.status === "done" && (item.suggestion?.confidence ?? 0) >= VERY_HIGH_CONFIDENCE_THRESHOLD
+        (item) => item.status === "done" && !item.unchanged && (item.suggestion?.confidence ?? 0) >= VERY_HIGH_CONFIDENCE_THRESHOLD
       );
     }
     if (filter === "high") {
       return items.filter(
-        (item) => item.status === "done" && (item.suggestion?.confidence ?? 0) >= HIGH_CONFIDENCE_THRESHOLD
+        (item) => item.status === "done" && !item.unchanged && (item.suggestion?.confidence ?? 0) >= HIGH_CONFIDENCE_THRESHOLD
       );
     }
     return items.filter((item) => {
-      if (item.status !== "done" || !item.suggestion) return false;
+      if (item.status !== "done" || !item.suggestion || item.unchanged) return false;
       const targetNb = edits[item.noteId]?.notebookId ?? item.suggestion.notebookId;
       return Boolean(targetNb && targetNb !== item.currentNotebookId);
     });
@@ -955,10 +1014,9 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                 </div>
               </div>
               {organizeJobs.length > 0 && (
-                <span className="text-xs font-mono text-muted-foreground">
-                  {organizeJobs.length} {organizeJobs.length === 1 ? "job" : "jobs"}
-                </span>
+                <div className="flex items-center gap-2"><Button type="button" size="sm" className="h-8 gap-1.5 text-xs" onClick={() => setNewJobOpen(true)}><Plus className="h-3.5 w-3.5" />New job</Button><span className="text-xs font-mono text-muted-foreground">{organizeJobs.length} {organizeJobs.length === 1 ? "job" : "jobs"}</span></div>
               )}
+              {organizeJobs.length === 0 && <Button type="button" size="sm" className="h-8 gap-1.5 text-xs" onClick={() => setNewJobOpen(true)}><Plus className="h-3.5 w-3.5" />New job</Button>}
             </div>
           </div>
 
@@ -1027,6 +1085,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                             >
                               {summary.status}
                             </Badge>
+                            <Badge variant="outline" className="text-[11px]">{summary.mode === "retitle" ? "Retitle only" : "Organize"}</Badge>
                             {summary.createdAt > 0 && (
                               <span className="text-xs text-muted-foreground">
                                 {formatRelativeTime(summary.createdAt)}
@@ -1110,6 +1169,40 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
             destructive
             isPending={deleteMutation.isPending}
             onConfirm={() => void handleDeleteJob()}
+          />
+          <NewOrganizeJobDialog
+            open={newJobOpen}
+            onOpenChange={setNewJobOpen}
+            notebooks={notebooks ?? []}
+            isPending={false}
+            onConfirm={(input) => void previewNewJob(input)}
+          />
+          <StartOrganizeDialog
+            open={Boolean(newJobScope)}
+            onOpenChange={(open) => {
+              if (!open && !createMutation.isPending && !cancelRunningMutation.isPending) {
+                setNewJobScope(null);
+                setNewJobConflict(null);
+              }
+            }}
+            selectedCount={newJobScope?.matched ?? 0}
+            notebooks={notebooks ?? []}
+            mode={newJobScope?.mode}
+            isPending={createMutation.isPending || cancelRunningMutation.isPending}
+            previousJobsCount={organizeJobs.length}
+            runningJob={organizeJobs.find((summary) => summary.status === "running") ?? null}
+            conflictRunningJobId={newJobConflict?.runningJobId ?? null}
+            conflictMessage={newJobConflict?.message ?? null}
+            onViewJobs={() => {
+              setNewJobScope(null);
+              navigate("/organize");
+            }}
+            onViewRunningJob={(runningJobId) => {
+              setNewJobScope(null);
+              navigate(`/organize/${runningJobId}`);
+            }}
+            onCancelAndStart={(runningJobId, excludeNotebookIds) => void cancelAndStartNewJob(runningJobId, excludeNotebookIds)}
+            onConfirm={(excludeNotebookIds) => void startNewJob(excludeNotebookIds)}
           />
         </div>
       ) : (
@@ -1269,7 +1362,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                 >
                   High confidence ({leftLabel(counts.highUnapplied, counts.high)})
                 </Button>
-                <Button
+                {!isRetitle && <Button
                   type="button"
                   size="sm"
                   variant={filter === "moves" ? "secondary" : "ghost"}
@@ -1278,7 +1371,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                   className="h-7 px-2.5 text-xs"
                 >
                   Changes notebook ({leftLabel(counts.movesUnapplied, counts.moves)})
-                </Button>
+                </Button>}
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -1410,8 +1503,8 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                         <span className="sr-only">Select</span>
                       </th>
                       <th className="w-[30%] px-3 py-2.5">Title</th>
-                      <th className="w-[23%] px-3 py-2.5">Notebook</th>
-                      <th className="w-[21%] px-3 py-2.5">Tags</th>
+                      {!isRetitle && <th className="w-[23%] px-3 py-2.5">Notebook</th>}
+                      {!isRetitle && <th className="w-[21%] px-3 py-2.5">Tags</th>}
                       <th className="w-[22%] px-3 py-2.5">Confidence &amp; reason</th>
                     </tr>
                   </thead>
@@ -1473,7 +1566,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                             )}
                           </td>
 
-                          <td className="px-3 py-3 space-y-1.5">
+                          {!isRetitle && <td className="px-3 py-3 space-y-1.5">
                             <div className="flex items-center gap-1 min-w-0 text-xs text-muted-foreground">
                               <span className="truncate min-w-0" title={item.currentNotebookPath || "Unknown"}>
                                 {item.currentNotebookPath || "Unknown"}
@@ -1495,9 +1588,9 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                             ) : item.status === "failed" ? null : (
                               <Skeleton className="h-8 w-full" />
                             )}
-                          </td>
+                          </td>}
 
-                          <td className="px-3 py-3">{renderTagsCell(item)}</td>
+                          {!isRetitle && <td className="px-3 py-3">{renderTagsCell(item)}</td>}
 
                           <td className="px-3 py-3 space-y-1">
                             <div className="flex flex-wrap items-center gap-1.5">
@@ -1590,18 +1683,18 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                             />
                           </div>
 
-                          <div className="space-y-1">
+                          {!isRetitle && <div className="space-y-1">
                             <span className="text-[11px] text-muted-foreground">
                               Destination notebook{" "}
                               {notebookId !== item.currentNotebookId ? `(from ${item.currentNotebookPath})` : ""}
                             </span>
                             {renderNotebookSelector(item)}
-                          </div>
+                          </div>}
 
-                          <div className="space-y-1">
+                          {!isRetitle && <div className="space-y-1">
                             <span className="text-[11px] text-muted-foreground">Tags</span>
                             {renderTagsCell(item)}
-                          </div>
+                          </div>}
 
                           {item.suggestion?.reason && (
                             <p className="text-xs text-muted-foreground leading-snug">{item.suggestion.reason}</p>

@@ -95,6 +95,61 @@ before(async () => {
   session = await app.login();
 });
 
+describe('organize scope and retitle endpoints', () => {
+  test('dry-run resolves source notebook scopes and validates mutually exclusive inputs', { timeout: TEST_TIMEOUT_MS }, async () => {
+    const withChildren = await app.api('/api/organize/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ sourceNotebookIds: [demoId('nb-work')], includeSubNotebooks: true, dryRun: true }),
+    });
+    const withoutChildren = await app.api('/api/organize/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ sourceNotebookIds: [demoId('nb-work')], includeSubNotebooks: false, dryRun: true }),
+    });
+    assert.equal(withChildren.status, 200);
+    assert.equal(withoutChildren.status, 200);
+    assert.ok(withChildren.data.matched >= withoutChildren.data.matched);
+    assert.equal((await app.api('/api/organize/jobs', { method: 'POST', body: JSON.stringify({ dryRun: true }) })).status, 400);
+    assert.equal((await app.api('/api/organize/jobs', { method: 'POST', body: JSON.stringify({ noteIds: [demoId('note-roadmap')], sourceNotebookIds: [], dryRun: true }) })).status, 400);
+  });
+
+  test('retitle endpoint returns a fake title suggestion and unknown notes are 404', { timeout: TEST_TIMEOUT_MS }, async () => {
+    const ok = await app.api('/api/organize/retitle', {
+      method: 'POST',
+      body: JSON.stringify({ noteId: demoId('note-scanned-invoice') }),
+    });
+    assert.equal(ok.status, 200);
+    assert.equal(typeof ok.data.title, 'string');
+    const missing = await app.api('/api/organize/retitle', {
+      method: 'POST',
+      body: JSON.stringify({ noteId: 'f'.repeat(32) }),
+    });
+    assert.equal(missing.status, 404);
+  });
+
+  test('retitle jobs expose title-only suggestions and undo without moving notes', { timeout: TEST_TIMEOUT_MS }, async () => {
+    const noteId = demoId('note-scanned-invoice');
+    const before = await app.api(`/api/notes/${noteId}`);
+    const started = await app.api('/api/organize/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ noteIds: [noteId], mode: 'retitle' }),
+    });
+    assert.equal(started.status, 201);
+    const job = await pollUntilDone(started.data.jobId);
+    assert.equal(job.mode, 'retitle');
+    assert.equal(job.items[0].suggestion.notebookId, '');
+    const applied = await app.api(`/api/organize/jobs/${started.data.jobId}/apply`, {
+      method: 'POST',
+      body: JSON.stringify({ items: [{ noteId, useSuggestion: true }] }),
+    });
+    assert.equal(applied.status, 200);
+    const changed = await app.api(`/api/notes/${noteId}`);
+    assert.equal(changed.data.parentId, before.data.parentId);
+    const undone = await app.api(`/api/organize/jobs/${started.data.jobId}/undo`, { method: 'POST' });
+    assert.equal(undone.status, 200);
+    assert.equal((await app.api(`/api/notes/${noteId}`)).data.title, before.data.title);
+  });
+});
+
 afterEach(async () => {
   for (const svc of trackedServices) {
     await svc.shutdown();

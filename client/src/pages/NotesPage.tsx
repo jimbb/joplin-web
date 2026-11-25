@@ -124,6 +124,7 @@ export function NotesPage() {
   const [organizeTargets, setOrganizeTargets] = useState<{
     notes: NoteListItem[];
     defaultExcludedNotebookId: string | null;
+    mode: "organize" | "retitle";
   } | null>(null);
   const [organizeConflict, setOrganizeConflict] = useState<{
     runningJobId: string;
@@ -479,6 +480,7 @@ export function NotesPage() {
       const { jobId } = await createOrganizeJob.mutateAsync({
         noteIds: organizeTargets.notes.map((n) => n.id),
         excludeNotebookIds,
+        ...(organizeTargets.mode === "retitle" ? { mode: "retitle" as const } : {}),
       });
       setOrganizeTargets(null);
       setOrganizeConflict(null);
@@ -663,7 +665,10 @@ export function NotesPage() {
               onBulkAddTag={handleBulkAddTag}
               onBulkTrash={handleBulkTrash}
               onAutoOrganize={(selected, defaultExcludedNotebookId) =>
-                setOrganizeTargets({ notes: selected, defaultExcludedNotebookId })
+                setOrganizeTargets({ notes: selected, defaultExcludedNotebookId, mode: "organize" })
+              }
+              onAutoRetitle={(selected, defaultExcludedNotebookId) =>
+                setOrganizeTargets({ notes: selected, defaultExcludedNotebookId, mode: "retitle" })
               }
               isBulkPending={bulkUpdate.isPending}
               bulkProgress={bulkProgress}
@@ -764,6 +769,7 @@ export function NotesPage() {
         }}
         onCancelAndStart={(runningJobId, excludeIds) => void handleCancelAndStartOrganize(runningJobId, excludeIds)}
         onConfirm={(excludeIds) => void handleStartOrganize(excludeIds)}
+        mode={organizeTargets?.mode}
       />
     </AppLayout>
   );

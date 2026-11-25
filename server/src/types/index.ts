@@ -289,6 +289,7 @@ export interface OrganizeStatus {
 
 export type OrganizeJobStatus = 'running' | 'done' | 'cancelled' | 'failed';
 export type OrganizeItemStatus = 'pending' | 'running' | 'done' | 'failed';
+export type OrganizeJobMode = 'organize' | 'retitle';
 
 export interface OrganizeSuggestion {
   title: string;
@@ -309,6 +310,8 @@ export interface OrganizeJobItem {
   error?: string;
   skipped?: boolean;
   suggestion?: OrganizeSuggestion;
+  /** A completed retitle suggestion equal to the current title needs no apply action. */
+  unchanged?: boolean;
   applied?: boolean;
   applyStatus?: 'ok' | 'conflict' | 'error';
   applyError?: string;
@@ -330,6 +333,7 @@ export interface OrganizeJobProgress {
 
 export interface OrganizeJobSummary {
   id: string;
+  mode: OrganizeJobMode;
   status: OrganizeJobStatus;
   error?: string;
   progress: OrganizeJobProgress;
@@ -373,6 +377,7 @@ export interface OrganizeTargetsResponse {
 
 export interface OrganizeJobResponse {
   id: string;
+  mode: OrganizeJobMode;
   status: OrganizeJobStatus;
   error?: string;
   excludeNotebookIds: string[];

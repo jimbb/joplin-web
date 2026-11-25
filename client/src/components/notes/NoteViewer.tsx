@@ -835,6 +835,7 @@ export function NoteViewer({
             <NoteEditor
               key={editorKey}
               note={note}
+              readOnly={!canEdit}
               focusTitle={startInEdit && !note.title}
               initialDraft={restoredDraft}
               onSaved={onNoteSaved}

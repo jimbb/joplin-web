@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { flattenNotebooks } from "@/lib/notebooks";
 import { Notebook, OrganizeJobSummary } from "@/lib/types";
+import type { OrganizeJobMode } from "@/lib/types";
 
 interface StartOrganizeDialogProps {
   open: boolean;
@@ -29,6 +30,7 @@ interface StartOrganizeDialogProps {
   onViewRunningJob?: (jobId: string) => void;
   onCancelAndStart?: (runningJobId: string, excludeNotebookIds: string[]) => void;
   onConfirm: (excludeNotebookIds: string[]) => void;
+  mode?: OrganizeJobMode;
 }
 
 /**
@@ -51,6 +53,7 @@ export function StartOrganizeDialog({
   onViewRunningJob,
   onCancelAndStart,
   onConfirm,
+  mode = "organize",
 }: StartOrganizeDialogProps) {
   const [excludedIds, setExcludedIds] = useState<Set<string>>(() =>
     defaultExcludedNotebookId ? new Set([defaultExcludedNotebookId]) : new Set()
@@ -99,7 +102,7 @@ export function StartOrganizeDialog({
             <DialogTitle className="flex items-center gap-2">
               <Sparkles className="h-4 w-4 text-primary shrink-0" aria-hidden="true" />
               <span>
-                Auto-organize {selectedCount} {noun}
+                {mode === "retitle" ? "Auto-retitle" : "Auto-organize"} {selectedCount} {noun}
               </span>
             </DialogTitle>
             {previousJobsCount > 0 && onViewJobs && (
@@ -117,7 +120,7 @@ export function StartOrganizeDialog({
             )}
           </div>
           <DialogDescription>
-            Suggest cleaner English titles, destination notebooks, and tags. Nothing changes until you review and apply.
+            {mode === "retitle" ? "Suggest cleaner English titles." : "Suggest cleaner English titles, destination notebooks, and tags."} Nothing changes until you review and apply.
           </DialogDescription>
         </DialogHeader>
 
@@ -129,7 +132,7 @@ export function StartOrganizeDialog({
             >
               <AlertTriangle className="h-4 w-4 text-warning shrink-0 mt-0.5" aria-hidden="true" />
               <div className="flex-1 min-w-0 space-y-1.5">
-                <p className="font-medium">Another Auto-organize job is currently running.</p>
+              <p className="font-medium">Another {mode === "retitle" ? "AI" : "Auto-organize"} job is currently running.</p>
                 <p className="text-muted-foreground">
                   {conflictMessage ||
                     (runningJob
@@ -152,11 +155,9 @@ export function StartOrganizeDialog({
             </div>
           )}
 
-          <div className="space-y-2">
+          {mode === "organize" && <div className="space-y-2">
             <div className="flex items-center justify-between gap-2">
-              <span className="text-xs font-medium text-foreground">
-                Exclude target notebooks
-              </span>
+              {mode === "organize" && <span className="text-xs font-medium text-foreground">Exclude target notebooks</span>}
               <span className="text-[11px] text-muted-foreground font-mono">
                 {excludedIds.size} excluded
               </span>
@@ -175,7 +176,7 @@ export function StartOrganizeDialog({
               </div>
             )}
 
-            <div
+            {mode === "organize" && <div
               role="group"
               aria-label="Notebooks to exclude as destinations"
               className="max-h-48 overflow-y-auto rounded-lg border border-border bg-muted/20 p-1.5 space-y-0.5"
@@ -208,18 +209,18 @@ export function StartOrganizeDialog({
                   No matching notebooks
                 </p>
               )}
-            </div>
-          </div>
+            </div>}
+          </div>}
 
           <div
             role="note"
             className="flex items-start gap-2.5 rounded-lg border border-border bg-muted/40 p-3 text-xs text-muted-foreground leading-relaxed"
           >
             <Info className="h-4 w-4 text-primary shrink-0 mt-0.5" aria-hidden="true" />
-            <p>
+              <p>
               <strong className="font-medium text-foreground">Sent to the configured AI provider:</strong>{" "}
-              each selected note&apos;s title, plain text (links stripped), attachment file names and OCR text,
-              along with your notebook names, sample titles, and tag list.
+                each selected note&apos;s title, plain text (links stripped), attachment file names and OCR text,
+              {mode === "organize" && <> along with your notebook names, sample titles, and tag list.</>}
             </p>
           </div>
         </div>
@@ -247,7 +248,7 @@ export function StartOrganizeDialog({
               className="gap-1.5"
             >
               {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-              Start organizing ({selectedCount})
+              {mode === "retitle" ? `Start retitling (${selectedCount})` : `Start organizing (${selectedCount})`}
             </Button>
           )}
         </DialogFooter>
