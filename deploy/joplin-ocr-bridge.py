@@ -4,7 +4,7 @@ Lightweight loopback HTTP OCR bridge for Joplin Web instant attachment OCR.
 
 Reuses the exact pdftotext / pdfinfo / pdftoppm / tesseract pipeline from
 /srv/joplin/ocr-runner/ocr.py, guarded by X-Ocr-Secret and bounded to two
-concurrent subprocess workers.
+concurrent subprocess workers. Also serves read-only scan queue status at GET /scans.
 """
 
 from __future__ import annotations
@@ -17,15 +17,19 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 MAX_BYTES = 25 * 1024 * 1024
 MAX_PAGE_PIXELS = 3508
 MAX_PDF_PAGES = int(os.environ.get("OCR_MAX_PDF_PAGES", "40"))
 MAX_CONCURRENCY = max(1, int(os.environ.get("OCR_BRIDGE_CONCURRENCY", "2")))
 WORK_ROOT = Path(os.environ.get("OCR_BRIDGE_WORK_DIR", "/tmp/joplin-ocr-bridge"))
+DEFAULT_SCAN_STATUS_DIR = "/srv/joplin/scan-status"
+MAX_SCAN_JOBS = 200
+SYSTEMCTL_TIMEOUT = 5
 
 os.environ["OMP_THREAD_LIMIT"] = "1"
 
@@ -53,6 +57,113 @@ MIME_EXT = {
 
 ALIAS_PATTERN = re.compile(r"(?<![A-Za-z0-9])(?:[A-Za-z0-9]\s+){2,}[A-Za-z0-9](?![A-Za-z0-9])")
 SEMAPHORE = threading.Semaphore(MAX_CONCURRENCY)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _query_cycle_running() -> bool:
+    try:
+        proc = subprocess.run(
+            ["systemctl", "show", "joplin-ocr.service", "-p", "ActiveState", "--value"],
+            capture_output=True,
+            text=True,
+            timeout=SYSTEMCTL_TIMEOUT,
+        )
+        return proc.returncode == 0 and proc.stdout.strip() in ("activating", "active")
+    except Exception:
+        return False
+
+
+def _query_next_run_at() -> str | None:
+    try:
+        proc = subprocess.run(
+            ["systemctl", "list-timers", "joplin-ocr.timer", "--output=json"],
+            capture_output=True,
+            text=True,
+            timeout=SYSTEMCTL_TIMEOUT,
+        )
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return None
+        entries = json.loads(proc.stdout)
+        if not isinstance(entries, list) or not entries:
+            return None
+        chosen = None
+        for item in entries:
+            if isinstance(item, dict) and item.get("unit") == "joplin-ocr.timer":
+                chosen = item
+                break
+        if chosen is None:
+            chosen = entries[0] if isinstance(entries[0], dict) else None
+        if not chosen:
+            return None
+        raw_next = chosen.get("next")
+        if isinstance(raw_next, (int, float)) and raw_next > 0:
+            return datetime.fromtimestamp(raw_next / 1_000_000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return None
+    except Exception:
+        return None
+
+
+def read_scan_status() -> dict[str, object]:
+    status_dir = Path(os.environ.get("SCAN_STATUS_DIR") or DEFAULT_SCAN_STATUS_DIR)
+    cycle: dict[str, object] = {
+        "phase": "idle",
+        "startedAt": None,
+        "phaseAt": None,
+        "finishedAt": None,
+        "result": None,
+        "ocrTotal": 0,
+        "ocrDone": 0,
+        "updatedAt": None,
+    }
+    cycle_path = status_dir / "cycle.json"
+    try:
+        if cycle_path.is_file():
+            data = json.loads(cycle_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for key in cycle:
+                    if key in data:
+                        cycle[key] = data[key]
+    except Exception:
+        pass
+
+    running = _query_cycle_running()
+    if not running:
+        cycle["phase"] = "idle"
+        cycle["startedAt"] = None
+        cycle["ocrTotal"] = 0
+        cycle["ocrDone"] = 0
+    cycle["running"] = running
+    cycle["nextRunAt"] = _query_next_run_at()
+
+    jobs: list[dict[str, object]] = []
+    jobs_dir = status_dir / "jobs"
+    try:
+        if jobs_dir.is_dir():
+            for entry in jobs_dir.iterdir():
+                if entry.name.startswith(".") or not entry.name.endswith(".json") or not entry.is_file():
+                    continue
+                try:
+                    data = json.loads(entry.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        jobs.append(data)
+                except Exception:
+                    continue
+    except Exception:
+        jobs = []
+
+    jobs.sort(
+        key=lambda j: (str(j.get("receivedAt") or ""), str(j.get("id") or "")),
+        reverse=True,
+    )
+    return {
+        "ok": True,
+        "now": _utc_now_iso(),
+        "cycle": cycle,
+        "jobs": jobs[:MAX_SCAN_JOBS],
+    }
 
 
 def run_tesseract(image_path: Path) -> list[str]:
@@ -158,23 +269,34 @@ class OcrHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _check_secret(self) -> bool:
+        secret = self.server.ocr_secret  # type: ignore[attr-defined]
+        provided = (self.headers.get("X-Ocr-Secret") or "").strip()
+        if not secret or not hmac.compare_digest(provided.encode("utf-8"), secret.encode("utf-8")):
+            self.send_json(401, {"error": "Invalid OCR secret"})
+            return False
+        return True
+
     def do_GET(self) -> None:
-        if self.path != "/health":
-            self.send_json(404, {"error": "Not found"})
+        path = urlsplit(self.path).path
+        if path == "/health":
+            tools = {name: bool(shutil.which(name)) for name in ("tesseract", "pdftotext", "pdfinfo", "pdftoppm")}
+            ok = all(tools.values())
+            self.send_json(200 if ok else 503, {"ok": ok, "tools": tools})
             return
-        tools = {name: bool(shutil.which(name)) for name in ("tesseract", "pdftotext", "pdfinfo", "pdftoppm")}
-        ok = all(tools.values())
-        self.send_json(200 if ok else 503, {"ok": ok, "tools": tools})
+        if path == "/scans":
+            if not self._check_secret():
+                return
+            self.send_json(200, read_scan_status())
+            return
+        self.send_json(404, {"error": "Not found"})
 
     def do_POST(self) -> None:
         if self.path != "/ocr":
             self.send_json(404, {"error": "Not found"})
             return
 
-        secret = self.server.ocr_secret  # type: ignore[attr-defined]
-        provided = (self.headers.get("X-Ocr-Secret") or "").strip()
-        if not secret or not hmac.compare_digest(provided.encode("utf-8"), secret.encode("utf-8")):
-            self.send_json(401, {"error": "Invalid OCR secret"})
+        if not self._check_secret():
             return
 
         try:
