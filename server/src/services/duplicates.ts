@@ -268,6 +268,31 @@ function isBlank(str: string): boolean {
   return true;
 }
 
+function stripHtmlAnchorResourceLinks(html: string, hasResourceId: (idLower: string) => boolean): string {
+  const lower = html.toLowerCase();
+  let out = '';
+  let lastCopied = 0;
+  let pos = 0;
+  const openRe = /<a\b[^<>]*>/gi;
+  while (pos < html.length) {
+    openRe.lastIndex = pos;
+    const match = openRe.exec(html);
+    if (!match) break;
+    const tagEnd = match.index + match[0].length;
+    const href = /\bhref=["']:\/([0-9a-fA-F]{32})(?:#[^"']*)?["']/i.exec(match[0]);
+    if (!href || !hasResourceId(href[1].toLowerCase())) {
+      pos = tagEnd;
+      continue;
+    }
+    const closeIdx = lower.indexOf('</a>', tagEnd);
+    if (closeIdx === -1) break;
+    out += `${html.slice(lastCopied, match.index)} `;
+    lastCopied = closeIdx + 4;
+    pos = lastCopied;
+  }
+  return lastCopied === 0 ? html : out + html.slice(lastCopied);
+}
+
 /**
  * Removes Joplin attachment links (`![...](:/id)`, `[...](:/id)`, `<img src=":/id">`, `<a href=":/id">`)
  * targeting known resources so attachment filenames do not distort text comparison.
@@ -277,25 +302,22 @@ function stripResourceLinks(body: string, hasResourceId: (idLower: string) => bo
   let cleaned = body;
   if (cleaned.includes('![')) {
     cleaned = cleaned.replace(
-      /!\[[^\]]*\]\(\s*:\/([0-9a-fA-F]{32})(?:\s+"[^"]*")?\s*\)/g,
+      /!\[[^[\]]*\]\(\s*:\/([0-9a-fA-F]{32})(?:\s+"[^"]*")?\s*\)/g,
       (match, id: string) => (hasResourceId(id.toLowerCase()) ? ' ' : match)
     );
   }
   if (cleaned.includes('[')) {
     cleaned = cleaned.replace(
-      /\[[^\]]*\]\(\s*:\/([0-9a-fA-F]{32})(?:#[^\s()"'<>]*)?(?:\s+"[^"]*")?\s*\)/g,
+      /\[[^[\]]*\]\(\s*:\/([0-9a-fA-F]{32})(?:#[^\s()"'<>]*)?(?:\s+"[^"]*")?\s*\)/g,
       (match, id: string) => (hasResourceId(id.toLowerCase()) ? ' ' : match)
     );
   }
   if (cleaned.includes('<')) {
-    cleaned = cleaned.replace(
-      /<img\b[^>]*\bsrc=["']:\/([0-9a-fA-F]{32})["'][^>]*>/gi,
-      (match, id: string) => (hasResourceId(id.toLowerCase()) ? ' ' : match)
-    );
-    cleaned = cleaned.replace(
-      /<a\b[^>]*\bhref=["']:\/([0-9a-fA-F]{32})(?:#[^"']*)?["'][^>]*>[\s\S]*?<\/a>/gi,
-      (match, id: string) => (hasResourceId(id.toLowerCase()) ? ' ' : match)
-    );
+    cleaned = cleaned.replace(/<img\b[^<>]*>/gi, (match) => {
+      const src = /\bsrc=["']:\/([0-9a-fA-F]{32})["']/i.exec(match);
+      return src && hasResourceId(src[1].toLowerCase()) ? ' ' : match;
+    });
+    cleaned = stripHtmlAnchorResourceLinks(cleaned, hasResourceId);
   }
   return cleaned;
 }

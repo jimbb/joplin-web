@@ -176,6 +176,31 @@ export function diffWords(leftText: string, rightText: string): WordDiffResult {
   };
 }
 
+function stripHtmlAnchorResourceLinks(html: string, resourceIds: Set<string>): string {
+  const lower = html.toLowerCase();
+  let out = "";
+  let lastCopied = 0;
+  let pos = 0;
+  const openRe = /<a\b[^<>]*>/gi;
+  while (pos < html.length) {
+    openRe.lastIndex = pos;
+    const match = openRe.exec(html);
+    if (!match) break;
+    const tagEnd = match.index + match[0].length;
+    const href = /\bhref=["']:\/([0-9a-fA-F]{32})(?:#[^"']*)?["']/i.exec(match[0]);
+    if (!href || !resourceIds.has(href[1].toLowerCase())) {
+      pos = tagEnd;
+      continue;
+    }
+    const closeIdx = lower.indexOf("</a>", tagEnd);
+    if (closeIdx === -1) break;
+    out += html.slice(lastCopied, match.index);
+    lastCopied = closeIdx + 4;
+    pos = lastCopied;
+  }
+  return lastCopied === 0 ? html : out + html.slice(lastCopied);
+}
+
 /**
  * Builds the plain body + OCR text string used for side-by-side word diffing.
  * Strips Joplin `:/<32-hex>` attachment links so filename differences do not clutter the diff.
@@ -187,19 +212,24 @@ export function buildComparableText(
   const resourceIds = new Set((attachments ?? []).map((a) => a.id.toLowerCase()));
   let cleanedBody = body ?? "";
   if (cleanedBody && resourceIds.size > 0 && cleanedBody.includes(":/")) {
-    cleanedBody = cleanedBody
-      .replace(/!\[[^\]]*\]\(\s*:\/([0-9a-fA-F]{32})(?:\s+"[^"]*")?\s*\)/g, (m, id: string) =>
-        resourceIds.has(id.toLowerCase()) ? "" : m
-      )
-      .replace(/\[[^\]]*\]\(\s*:\/([0-9a-fA-F]{32})(?:#[^\s()"'<>]*)?(?:\s+"[^"]*")?\s*\)/g, (m, id: string) =>
-        resourceIds.has(id.toLowerCase()) ? "" : m
-      )
-      .replace(/<img\b[^>]*\bsrc=["']:\/([0-9a-fA-F]{32})["'][^>]*>/gi, (m, id: string) =>
-        resourceIds.has(id.toLowerCase()) ? "" : m
-      )
-      .replace(/<a\b[^>]*\bhref=["']:\/([0-9a-fA-F]{32})(?:#[^"']*)?["'][^>]*>[\s\S]*?<\/a>/gi, (m, id: string) =>
+    if (cleanedBody.includes("![")) {
+      cleanedBody = cleanedBody.replace(/!\[[^[\]]*\]\(\s*:\/([0-9a-fA-F]{32})(?:\s+"[^"]*")?\s*\)/g, (m, id: string) =>
         resourceIds.has(id.toLowerCase()) ? "" : m
       );
+    }
+    if (cleanedBody.includes("[")) {
+      cleanedBody = cleanedBody.replace(
+        /\[[^[\]]*\]\(\s*:\/([0-9a-fA-F]{32})(?:#[^\s()"'<>]*)?(?:\s+"[^"]*")?\s*\)/g,
+        (m, id: string) => (resourceIds.has(id.toLowerCase()) ? "" : m)
+      );
+    }
+    if (cleanedBody.includes("<")) {
+      cleanedBody = cleanedBody.replace(/<img\b[^<>]*>/gi, (m) => {
+        const src = /\bsrc=["']:\/([0-9a-fA-F]{32})["']/i.exec(m);
+        return src && resourceIds.has(src[1].toLowerCase()) ? "" : m;
+      });
+      cleanedBody = stripHtmlAnchorResourceLinks(cleanedBody, resourceIds);
+    }
   }
   const bodyPart = cleanedBody.trim();
   const ocrParts = (attachments ?? [])

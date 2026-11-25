@@ -29,7 +29,7 @@ import type {
 import { CacheEntry, isConflictNote, noteCache } from './note-cache.js';
 import { assertValidId, MAX_BATCH_SIZE, noteWriter, WriteValidationError } from './note-writer.js';
 import { extractLinkedResourceIds } from './search-query.js';
-import { markupLanguageOf } from './serializer.js';
+import { markupLanguageOf, replaceMarkdownLinks } from './serializer.js';
 
 /** Fixed document-type tag vocabulary allowed for Auto-organize suggestions. */
 export const ORGANIZE_DOCUMENT_TYPE_TAGS = [
@@ -426,24 +426,28 @@ export function stripLinksFromBody(body: string, markupLanguage = 1, maxChars = 
   let text = body;
   if (markupLanguage === 2) {
     text = text
-      .replace(/<a\b[^>]*>([\s\S]*?)<\/a>/gi, '$1')
-      .replace(/<img\b[^>]*alt=["']([^"']*)["'][^>]*>/gi, '$1')
-      .replace(/<[^>]+>/g, ' ')
+      .replace(/<\/?a\b[^<>]*>/gi, '')
+      .replace(/<img\b[^<>]*>/gi, (tag) => {
+        const alt = /\balt=(?:"([^"]*)"|'([^']*)')/i.exec(tag);
+        return alt ? (alt[1] ?? alt[2] ?? '') : ' ';
+      })
+      .replace(/<[^<>]+>/g, ' ')
       .replace(/&nbsp;/gi, ' ')
       .replace(/&amp;/gi, '&')
       .replace(/&lt;/gi, '<')
       .replace(/&gt;/gi, '>')
       .replace(/&quot;/gi, '"');
-  } else {
-    text = text
-      .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-      .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+  } else if (text.includes('[')) {
+    if (text.includes('![')) {
+      text = replaceMarkdownLinks(text, { images: true, keepLabel: true, allowEmptyLabel: true });
+    }
+    text = replaceMarkdownLinks(text, { images: false, keepLabel: true, allowEmptyLabel: true });
   }
   text = text
     .replace(/:\/[0-9a-fA-F]{32}/g, ' ')
     .replace(/https?:\/\/[^\s)>"']+/gi, ' ')
     .replace(/\r\n/g, '\n')
-    .replace(/[ \t]+\n/g, '\n')
+    .replace(/[ \t]+(\n)?/g, (m, nl) => (nl ? '\n' : m))
     .replace(/\n{3,}/g, '\n\n')
     .trim();
   if (text.length > maxChars) {
@@ -988,8 +992,10 @@ export function buildRetitleUserPrompt(input: {
 
 function unwrapJsonContent(raw: string): string {
   const trimmed = raw.trim();
-  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed);
-  return fenced ? fenced[1].trim() : trimmed;
+  if (trimmed.startsWith('```') && trimmed.endsWith('```') && trimmed.length >= 6) {
+    return trimmed.slice(3, -3).replace(/^json/i, '').trim();
+  }
+  return trimmed;
 }
 
 function normalizeSuggestedTitle(rawTitle: string, currentTitle: string, maxChars = MAX_TITLE_CHARS): string {

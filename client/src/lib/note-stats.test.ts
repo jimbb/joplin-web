@@ -98,4 +98,14 @@ describe("joplinToRichHtml and richHtmlToJoplin", () => {
       `<p><img src=":/${imgId}" alt="X"><a href=":/${noteId}">Link</a></p>`
     );
   });
+
+  it("handles pathological markdown and HTML inputs in linear time", () => {
+    const startedAt = performance.now();
+    expect(extractHeadings(`# ${" ".repeat(30_000)}x`)).toEqual([{ level: 1, text: "x", slug: "x" }]);
+    expect(computeNoteStats("![".repeat(30_000), false).words).toBeGreaterThan(0);
+    expect(computeNoteStats("<".repeat(30_000), true).words).toBe(1);
+    expect(joplinToRichMarkdown(`${"![".repeat(30_000)} :/${imgId}`)).toContain(`:/${imgId}`);
+    expect(joplinToRichHtml(`${"<img ".repeat(20_000)} :/${imgId}`)).toContain(`:/${imgId}`);
+    expect(performance.now() - startedAt).toBeLessThan(300);
+  });
 });
