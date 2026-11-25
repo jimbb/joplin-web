@@ -23,6 +23,7 @@ process.env.TRUST_PROXY ??= 'loopback';
 process.env.AI_FAKE = '1';
 process.env.AI_BASE_URL ??= 'http://127.0.0.1:18317/v1';
 process.env.AI_MODEL ??= 'deepseek-flash';
+process.env.SCAN_STATUS_FAKE ??= '1';
 await import('../src/index.js');
 
 console.log(`[Demo] Mock Joplin Server running at ${mock.url}`);

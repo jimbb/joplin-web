@@ -4,6 +4,8 @@ import { useAuth } from "@/hooks/use-auth";
 import { SEARCH_SYNTAX_HINT } from "@/lib/ui-constants";
 import { NotebookBreadcrumb } from "@/lib/types";
 import { ThemeToggle } from "@/components/common/ThemeToggle";
+import { ScanQueue } from "@/components/layout/ScanQueue";
+import { useScans } from "@/hooks/use-scans";
 import { AboutDialog } from "@/components/common/Dialogs";
 import { SecurityDialog } from "@/components/auth/SecurityDialog";
 import { Button } from "@/components/ui/button";
@@ -69,6 +71,7 @@ export function Header({
 }: HeaderProps) {
   const navigate = useNavigate();
   const { logout, email } = useAuth();
+  const scans = useScans();
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [securityOpen, setSecurityOpen] = useState(false);
@@ -247,6 +250,7 @@ export function Header({
         )}
 
         {/* Theme toggle */}
+        {scans.data?.enabled && <ScanQueue status={scans.data} />}
         <ThemeToggle />
 
         {/* User Account Menu */}

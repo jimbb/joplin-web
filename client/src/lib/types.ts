@@ -586,6 +586,48 @@ export interface AiFeatureStatus {
   transcribeModel?: string;
 }
 
+export type ScanStage = "received" | "importing" | "queued" | "ocr" | "syncing" | "done" | "skipped" | "failed";
+export type ScanCyclePhase = "idle" | "sync" | "import" | "ocr" | "upload";
+
+export interface ScanJob {
+  id: string;
+  name: string;
+  size: number;
+  stage: ScanStage;
+  receivedAt: string;
+  updatedAt: string;
+  doneAt: string | null;
+  noteId: string | null;
+  resourceId: string | null;
+  pages: number | null;
+  page: number | null;
+  error: string | null;
+  queuePosition: number | null;
+  stalled: boolean;
+}
+
+export interface ScanCycle {
+  phase: ScanCyclePhase;
+  running: boolean;
+  startedAt: string | null;
+  phaseAt: string | null;
+  finishedAt: string | null;
+  result: "ok" | "failed" | null;
+  ocrTotal: number;
+  ocrDone: number;
+  nextRunAt: string | null;
+}
+
+export interface ScanStatus {
+  enabled: boolean;
+  available?: boolean;
+  error?: string;
+  active?: number;
+  cycle?: ScanCycle;
+  jobs?: ScanJob[];
+  recent?: ScanJob[];
+}
+
 export interface AudioTranscribeResponse {
   text: string;
   model: string;

@@ -56,6 +56,10 @@ export interface AppConfig {
   ocrServiceUrl: string | null;
   /** Shared secret header X-Ocr-Secret sent to OCR_SERVICE_URL (OCR_SERVICE_SECRET) */
   ocrServiceSecret: string | null;
+  /** Email addresses allowed to view scan status (SCAN_STATUS_EMAILS, comma-separated) */
+  scanStatusEmails: string[];
+  /** Enables deterministic scan status data for the demo and screenshots (SCAN_STATUS_FAKE) */
+  scanStatusFake: boolean;
   /** How long POST /api/resources waits for inline OCR before returning pending (OCR_INLINE_WAIT_MS) */
   ocrInlineWaitMs: number;
   /** Transcription model name used via AI_BASE_URL (AI_TRANSCRIBE_MODEL; 'off'/'none'/'false' disables) */
@@ -282,6 +286,19 @@ export function parseClipperExtensionIds(raw: string | undefined): string[] {
   return Array.from(new Set(ids));
 }
 
+/** Parses SCAN_STATUS_EMAILS as a case-insensitive, comma-separated allow-list. */
+export function parseScanStatusEmails(raw: string | undefined): string[] {
+  if (!raw?.trim()) return [];
+  return Array.from(
+    new Set(
+      raw
+        .split(',')
+        .map((entry) => entry.trim().toLowerCase())
+        .filter(Boolean)
+    )
+  );
+}
+
 /**
  * Whether WebAuthn passkeys are configured on the server. Requires PUBLIC_URL in production; in
  * development/demo http://localhost origins are allowed.
@@ -367,6 +384,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     emailIngestNotebookId: env.EMAIL_INGEST_NOTEBOOK_ID?.trim() || null,
     ocrServiceUrl: parseOptionalHttpUrl('OCR_SERVICE_URL', env.OCR_SERVICE_URL),
     ocrServiceSecret: env.OCR_SERVICE_SECRET?.trim() || null,
+    scanStatusEmails: parseScanStatusEmails(env.SCAN_STATUS_EMAILS),
+    scanStatusFake: parseBoolean('SCAN_STATUS_FAKE', env.SCAN_STATUS_FAKE, false),
     ocrInlineWaitMs: parseNonNegativeInt('OCR_INLINE_WAIT_MS', env.OCR_INLINE_WAIT_MS, 4000),
     aiTranscribeModel: parseAiTranscribeModel(env.AI_TRANSCRIBE_MODEL, aiBaseUrl, aiModel),
     clipperExtensionIds: parseClipperExtensionIds(env.CLIPPER_EXTENSION_IDS),

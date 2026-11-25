@@ -47,6 +47,7 @@ import {
   TotpSetupResponse,
   TwoFactorCompleteResponse,
   TwoFactorMethod,
+  ScanStatus,
 } from "./types";
 import type {
   PublicKeyCredentialCreationOptionsJSON,
@@ -514,6 +515,11 @@ export async function getWriteState(): Promise<WriteState> {
   const data = await request<{ writable?: unknown; reason?: unknown } | null>("/api/account/write-state");
   const writable = data?.writable !== false;
   return { writable, reason: !writable && typeof data?.reason === "string" ? data.reason : null };
+}
+
+/** Fetches the host ScanSnap/OCR pipeline status for the signed-in account. */
+export async function getScans(): Promise<ScanStatus> {
+  return request<ScanStatus>("/api/scans");
 }
 
 /**

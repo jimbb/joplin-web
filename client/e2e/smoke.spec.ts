@@ -90,6 +90,18 @@ test("browses notebooks and tags of the demo data", async ({ page }) => {
   await expect(sidebar.getByRole("button", { name: /^cooking\b/ })).toBeVisible();
 });
 
+test("shows the live scan queue in the demo", async ({ page }) => {
+  await signIn(page);
+  const queueButton = page.getByRole("button", { name: "Scan queue, 3 in progress" });
+  await expect(queueButton).toBeVisible();
+  await queueButton.click();
+  await expect(page.getByText("OCR page 2 of 3", { exact: true })).toBeVisible();
+  const recent = page.getByRole("region", { name: "Recent scans" });
+  await expect(recent.getByText("Ready, 5 min ago", { exact: true })).toBeVisible();
+  await recent.getByRole("link", { name: "Open" }).first().dispatchEvent("click");
+  await expect(page).toHaveURL(new RegExp(`/notes/${demoId("note-scanned-invoice")}$`));
+});
+
 test("creates, edits, tags, finds, trashes and restores a note", async ({ page }) => {
   const word = uniqueWord("zebra");
   const tag = uniqueWord("tag");

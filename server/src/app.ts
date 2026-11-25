@@ -22,12 +22,14 @@ import { createOrganizeRouter } from './routes/organize.js';
 import { createPreferencesRouter } from './routes/preferences.js';
 import { resourcesRouter } from './routes/resources.js';
 import { searchRouter } from './routes/search.js';
+import { createScansRouter } from './routes/scans.js';
 import { tagsRouter } from './routes/tags.js';
 import { tasksRouter } from './routes/tasks.js';
 import { organizerService, OrganizerService } from './services/organizer.js';
 import { PreferencesStore } from './services/preferences-store.js';
 import { TwoFactorStore } from './services/two-factor-store.js';
 import { noteCache } from './services/note-cache.js';
+import { ScanStatusService } from './services/scan-status.js';
 
 /**
  * Builds the Content-Security-Policy directives that differ from helmet's defaults.
@@ -61,7 +63,11 @@ export function cspDirectives(
  */
 export function createApp(
   config: AppConfig,
-  deps: { organizer?: OrganizerService; fetchClip?: typeof fetchAndClipUrl } = {}
+  deps: {
+    organizer?: OrganizerService;
+    fetchClip?: typeof fetchAndClipUrl;
+    scanStatus?: ScanStatusService;
+  } = {}
 ): Express {
   const organizer = deps.organizer ?? organizerService;
   if (organizer.isEnabled()) {
@@ -182,6 +188,18 @@ export function createApp(
   );
   app.use('/api/tags', tagsRouter);
   app.use('/api/search', searchRouter);
+  app.use(
+    '/api/scans',
+    createScansRouter(
+      deps.scanStatus ??
+        new ScanStatusService({
+          ocrServiceUrl: config.ocrServiceUrl,
+          ocrServiceSecret: config.ocrServiceSecret,
+          scanStatusEmails: config.scanStatusEmails,
+          scanStatusFake: config.scanStatusFake,
+        })
+    )
+  );
   app.use('/api/resources', resourcesRouter);
   app.use('/api', createClipRouter({ fetchClip: deps.fetchClip }));
 
