@@ -161,7 +161,7 @@ export function Header({
               </span>
             </div>
           ) : (
-            <span className="text-foreground/80 font-medium">All Notes</span>
+            <span className="shrink-0 whitespace-nowrap text-foreground/80 font-medium">All Notes</span>
           )}
 
           {noteTitle && (
