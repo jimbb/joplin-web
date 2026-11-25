@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
   buildOcrSnippet,
+  buildRawOcrSnippet,
+  compileSearchTerm,
   extractLinkedResourceIds,
   isEmptySearchQuery,
   matchesDateFilters,
@@ -164,5 +166,104 @@ describe('OCR normalization and snippets', () => {
     assert.equal(matchesDateFilters(Date.UTC(2026, 4, 10, 0, 0, 0), q.createdFilters), true);
     assert.equal(matchesDateFilters(Date.UTC(2026, 3, 15, 0, 0, 0), q.updatedFilters), false);
     assert.equal(matchesDateFilters(Date.UTC(2026, 4, 15, 0, 0, 0), q.updatedFilters), true);
+  });
+});
+
+describe('compileSearchTerm', () => {
+  test('matches ASCII, Unicode and regex metacharacters case-insensitively', () => {
+    const plain = compileSearchTerm('c++ ($42.00)');
+    assert.equal(plain.text.test('Total for C++ ($42.00) today'), true);
+    assert.equal(plain.text.test('Total for Cxx ($42a00) today'), false);
+    assert.equal(plain.text.test('C++\n($42.00)'), false, 'literal text matcher keeps spaces literal');
+    assert.equal(plain.ocr.test('C++\r\n\t ($42.00)'), true, 'OCR matcher collapses whitespace runs');
+
+    const unicode = compileSearchTerm('café 結單');
+    assert.equal(unicode.text.test('CAFÉ 結單'), true);
+    assert.equal(unicode.ocr.test('CAFÉ\n  結單'), true);
+
+    const single = compileSearchTerm('invoice');
+    assert.equal(single.text, single.ocr);
+    assert.equal(single.text.test('INVOICE'), true);
+  });
+});
+
+describe('buildRawOcrSnippet', () => {
+  test('matches buildOcrSnippet(normalizeOcrText(ocr), terms) across whitespace and boundary edge cases', () => {
+    const cases: Array<{ name: string; raw: string; terms: string[] }> = [
+      {
+        name: 'leading and trailing whitespace with match at start',
+        raw: '   \r\n\t  Invoice #1042 for Harborview Hardware\t\n  ',
+        terms: ['invoice'],
+      },
+      {
+        name: 'match at position 0 of long text',
+        raw: `Statement ${'word '.repeat(30)}tail`,
+        terms: ['statement'],
+      },
+      {
+        name: 'match at very end of long text with trailing CRLF',
+        raw: `${'prefix '.repeat(25)}Final Balance\r\n  \t `,
+        terms: ['balance'],
+      },
+      {
+        name: 'phrase wrapped across CRLF, tabs and blank lines',
+        raw: `${'alpha beta '.repeat(12)}Account\r\n\t\n   Balance\n\n$1,234.56 ${'gamma delta '.repeat(12)}`,
+        terms: ['account balance'],
+      },
+      {
+        name: 'earliest term wins and first term wins ties',
+        raw: `${'intro '.repeat(15)}Account Balance Summary ${'outro '.repeat(15)}`,
+        terms: ['account', 'account balance', 'summary'],
+      },
+      {
+        name: 'exact 60-char and 61-char boundaries before and after match',
+        raw: `${'a'.repeat(60)}KEY${'b'.repeat(60)}`,
+        terms: ['key'],
+      },
+      {
+        name: '61-char boundaries without spaces (no word snap possible)',
+        raw: `${'a'.repeat(61)}KEY${'b'.repeat(61)}`,
+        terms: ['key'],
+      },
+      {
+        name: 'space right at -61 and +60 boundary does not snap inward',
+        raw: `head ${'a'.repeat(60)}KEY${'b'.repeat(60)} tail`,
+        terms: ['key'],
+      },
+      {
+        name: 'space immediately adjacent to match snaps to word boundary',
+        raw: `${'x'.repeat(80)} KEY ${'y'.repeat(80)}`,
+        terms: ['key'],
+      },
+      {
+        name: 'huge whitespace runs before and after match',
+        raw: `earlier words ${' \r\n\t'.repeat(1200)}Target Phrase${' \n\t'.repeat(1200)} later words`,
+        terms: ['target phrase'],
+      },
+      {
+        name: 'CJK and regex metacharacters with NBSP',
+        raw: `${'備註 '.repeat(30)}月結單\u00A0$42.00 (HKD)${' 項目'.repeat(30)}`,
+        terms: ['月結單 $42.00 (hkd)'],
+      },
+      {
+        name: 'no match returns null',
+        raw: '   ACME\r\nHardware   ',
+        terms: ['missing'],
+      },
+      {
+        name: 'empty text or empty terms returns null',
+        raw: '',
+        terms: ['invoice'],
+      },
+    ];
+
+    for (const c of cases) {
+      const expected = buildOcrSnippet(normalizeOcrText(c.raw), c.terms);
+      const actual = buildRawOcrSnippet(
+        c.raw,
+        c.terms.map((t) => compileSearchTerm(t))
+      );
+      assert.equal(actual, expected, `mismatch in case: ${c.name}`);
+    }
   });
 });

@@ -440,3 +440,49 @@ describe('list thumbnails', () => {
     }
   });
 });
+
+describe('per-note search/preview memoization', () => {
+  test('invalidates memoized preview and linked resource ids when a cached note is mutated in place', async () => {
+    const entry = await noteCache.getEntry(session);
+    const note = entry.notes.get(NOTE)!;
+    const origBody = note.body;
+    const origMarkup = note.properties.markup_language;
+    const resId = 'fedcba9876543210fedcba9876543210';
+    entry.resources.set(resId, {
+      id: resId,
+      title: 'memo.pdf',
+      mime: 'application/pdf',
+      filename: 'memo.pdf',
+      fileExtension: 'pdf',
+      size: 100,
+      updatedTime: Date.now(),
+      ocrText: 'UniqueMemoOcrToken',
+      ocrStatus: 2,
+    });
+    try {
+      const before = await noteCache.getNote(session, NOTE);
+      assert.ok(before?.preview);
+      assert.equal((await noteCache.searchNotes(session, 'UniqueMemoOcrToken')).length, 0);
+
+      // Mutate body in place: both preview and linked resource ids must update
+      note.body = `**Updated** body linking [memo.pdf](:/${resId})`;
+      note.properties.markup_language = '1';
+      const afterBody = await noteCache.getNote(session, NOTE);
+      assert.equal(afterBody?.preview, 'Updated body linking memo.pdf');
+      const ocrHits = await noteCache.searchNotes(session, 'UniqueMemoOcrToken');
+      assert.deepEqual(ocrHits.map((n) => n.id), [NOTE]);
+
+      // Mutate markup_language in place: preview must re-evaluate with the new markup mode
+      note.body = '**Bold** &amp; text';
+      note.properties.markup_language = '1';
+      assert.equal((await noteCache.getNote(session, NOTE))?.preview, 'Bold &amp; text');
+      note.properties.markup_language = '2';
+      assert.equal((await noteCache.getNote(session, NOTE))?.preview, '**Bold** & text');
+    } finally {
+      note.body = origBody;
+      if (origMarkup === undefined) delete note.properties.markup_language;
+      else note.properties.markup_language = origMarkup;
+      entry.resources.delete(resId);
+    }
+  });
+});

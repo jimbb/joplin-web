@@ -5,13 +5,14 @@ import { config } from '../config.js';
 import { JoplinApiError, JoplinNotFoundError, joplinApi } from './joplin-api.js';
 import { deserialize, markupLanguageOf, notePreview } from './serializer.js';
 import {
-  buildOcrSnippet,
+  buildRawOcrSnippet,
+  compileSearchTerm,
   extractLinkedResourceIds,
   isEmptySearchQuery,
   matchesDateFilters,
   matchesNamePattern,
-  normalizeOcrText,
   parseSearchQuery,
+  type CompiledSearchTerm,
 } from './search-query.js';
 import { extractInlineTasks } from './inline-tasks.js';
 import { reconstructRevisionContent, RevisionDiffRecord } from './revision-patch.js';
@@ -137,6 +138,47 @@ const tagTitle = (item: RawJoplinItem): string => (isEncrypted(item) ? 'Encrypte
 
 /** Image types every browser shows in an `<img>`: no SVG (sent as an attachment) or TIFF/HEIC */
 const THUMBNAIL_IMAGE_MIME = /^image\/(jpeg|png|gif|webp|avif|bmp)$/;
+
+interface NoteMemo {
+  body: string;
+  linkedResourceIds?: readonly string[];
+  previewMarkup?: number;
+  preview?: string;
+}
+
+const EMPTY_RESOURCE_IDS: readonly string[] = Object.freeze([]);
+const noteMemos = new WeakMap<RawJoplinItem, NoteMemo>();
+
+function noteMemoOf(note: RawJoplinItem): NoteMemo {
+  const body = note.body || '';
+  let memo = noteMemos.get(note);
+  if (!memo || memo.body !== body) {
+    memo = { body };
+    noteMemos.set(note, memo);
+  }
+  return memo;
+}
+
+/** Memoized linked resource IDs for a note, invalidated automatically if `note.body` changes */
+function noteLinkedResourceIds(note: RawJoplinItem): readonly string[] {
+  const memo = noteMemoOf(note);
+  if (memo.linkedResourceIds === undefined) {
+    const ids = extractLinkedResourceIds(memo.body);
+    memo.linkedResourceIds = ids.length === 0 ? EMPTY_RESOURCE_IDS : ids;
+  }
+  return memo.linkedResourceIds;
+}
+
+/** Memoized 150-char list preview for a note, invalidated if `note.body` or markup language changes */
+function noteListPreview(note: RawJoplinItem): string {
+  const markup = markupLanguageOf(note.properties);
+  const memo = noteMemoOf(note);
+  if (memo.preview === undefined || memo.previewMarkup !== markup) {
+    memo.preview = notePreview(memo.body, markup, 150);
+    memo.previewMarkup = markup;
+  }
+  return memo.preview;
+}
 
 /**
  * The first image or PDF attachment a note body links to (`:/id` in Markdown or HTML), shown as the
@@ -1077,7 +1119,7 @@ export class NoteCacheService {
         createdTime: n.createdTime,
         updatedTime: n.updatedTime,
         deletedTime: n.deletedTime || 0,
-        preview: notePreview(n.body, markupLanguageOf(n.properties), 150),
+        preview: noteListPreview(n),
         isTodo: n.isTodo,
         todoCompleted: Boolean(n.todoCompleted),
         todoDue: n.todoDue,
@@ -1135,7 +1177,7 @@ export class NoteCacheService {
       id: note.id,
       title: note.title,
       body: note.body,
-      preview: notePreview(note.body, markupLanguageOf(note.properties), 150),
+      preview: noteListPreview(note),
       parentId: note.parentId || '',
       notebook,
       tags,
@@ -1240,6 +1282,13 @@ export class NoteCacheService {
     }
 
     const tagIdsByNote = this.tagIdsByNoteOf(entry);
+    const termMatchers = parsed.terms.map(compileSearchTerm);
+    const excludedMatchers = parsed.excludedTerms.map(compileSearchTerm);
+    const needsLinksForSearch =
+      parsed.hasAttachment !== undefined ||
+      parsed.hasOcr !== undefined ||
+      excludedMatchers.length > 0 ||
+      termMatchers.length > 0;
 
     const results: Array<SearchResult & { relevanceScore: number }> = [];
 
@@ -1288,17 +1337,8 @@ export class NoteCacheService {
       const encrypted = isEncrypted(note);
       const title = note.title || '';
       const body = note.body || '';
-      const titleLower = title.toLowerCase();
-      const bodyLower = body.toLowerCase();
 
-      const linkedResourceIds =
-        !encrypted &&
-        (parsed.hasAttachment !== undefined ||
-          parsed.hasOcr !== undefined ||
-          parsed.excludedTerms.length > 0 ||
-          parsed.terms.length > 0)
-          ? extractLinkedResourceIds(body)
-          : [];
+      const linkedResourceIds = !encrypted && needsLinksForSearch ? noteLinkedResourceIds(note) : EMPTY_RESOURCE_IDS;
 
       if (parsed.hasAttachment !== undefined) {
         const hasAtt = !encrypted && linkedResourceIds.some((id) => entry.resources.has(id));
@@ -1310,52 +1350,80 @@ export class NoteCacheService {
         if (parsed.hasOcr !== hasOcrText) continue;
       }
 
-      if (parsed.excludedTerms.some((term) => titleLower.includes(term) || bodyLower.includes(term))) {
+      if (excludedMatchers.length > 0 && excludedMatchers.some((m) => m.text.test(title) || m.text.test(body))) {
         continue;
       }
 
-      const unmatchedTerms = parsed.terms.filter((term) => !titleLower.includes(term) && !bodyLower.includes(term));
-      if (encrypted && unmatchedTerms.length > 0) {
+      let titleHits = 0;
+      let bodyHits = 0;
+      let matchIdx = -1;
+      let matchLength = 0;
+      let matchTermIdx = -1;
+      const unmatchedMatchers: CompiledSearchTerm[] = [];
+
+      for (let i = 0; i < termMatchers.length; i++) {
+        const m = termMatchers[i];
+        if (m.text.test(title)) {
+          titleHits++;
+        } else {
+          const bm = m.text.exec(body);
+          if (bm) {
+            bodyHits++;
+            if (matchIdx === -1 || bm.index < matchIdx) {
+              matchIdx = bm.index;
+              matchLength = bm[0].length;
+              matchTermIdx = i;
+            }
+          } else {
+            unmatchedMatchers.push(m);
+          }
+        }
+      }
+
+      if (encrypted && unmatchedMatchers.length > 0) {
         continue;
       }
 
       let excludedByAttachment = false;
-      const attachmentOcrs: Array<{ normalized: string; lower: string }> = [];
-      if (!encrypted && (unmatchedTerms.length > 0 || parsed.excludedTerms.length > 0)) {
+      const attachmentOcrs: string[] = [];
+      if (!encrypted && (unmatchedMatchers.length > 0 || excludedMatchers.length > 0)) {
         for (const resId of linkedResourceIds) {
           const ocrText = entry.resources.get(resId)?.ocrText;
           if (!ocrText) continue;
-          const normalized = normalizeOcrText(ocrText);
-          if (!normalized) continue;
-          const lower = normalized.toLowerCase();
-          if (parsed.excludedTerms.some((term) => lower.includes(term))) {
+          if (excludedMatchers.length > 0 && excludedMatchers.some((m) => m.ocr.test(ocrText))) {
             excludedByAttachment = true;
             break;
           }
-          attachmentOcrs.push({ normalized, lower });
+          attachmentOcrs.push(ocrText);
         }
       }
       if (excludedByAttachment) continue;
 
       if (
-        unmatchedTerms.length > 0 &&
+        unmatchedMatchers.length > 0 &&
         (attachmentOcrs.length === 0 ||
-          !unmatchedTerms.every((term) => attachmentOcrs.some(({ lower }) => lower.includes(term))))
+          !unmatchedMatchers.every((m) => attachmentOcrs.some((ocr) => m.ocr.test(ocr))))
       ) {
         continue;
       }
 
-      const titleHits = parsed.terms.filter((term) => titleLower.includes(term)).length;
-      // Earliest occurrence of any term in the body, for the snippet
-      let matchIdx = -1;
-      let matchLength = 0;
-      for (const term of parsed.terms) {
-        const idx = bodyLower.indexOf(term);
-        if (idx !== -1 && (matchIdx === -1 || idx < matchIdx)) {
-          matchIdx = idx;
-          matchLength = term.length;
+      // Terms that matched in the title deferred their body scan until the note passed all filters
+      if (titleHits > 0) {
+        for (let i = 0; i < termMatchers.length; i++) {
+          const m = termMatchers[i];
+          if (!m.text.test(title)) continue;
+          const bm = m.text.exec(body);
+          if (bm) {
+            bodyHits++;
+            if (matchIdx === -1 || bm.index < matchIdx || (bm.index === matchIdx && i < matchTermIdx)) {
+              matchIdx = bm.index;
+              matchLength = bm[0].length;
+              matchTermIdx = i;
+            }
+          }
         }
       }
+
       const inTitle = titleHits > 0;
       const inBody = matchIdx !== -1;
 
@@ -1368,9 +1436,9 @@ export class NoteCacheService {
         snippet = `${start > 0 ? '...' : ''}${notePreview(rawSnippet, markupLanguageOf(note.properties), 150)}${
           end < body.length ? '...' : ''
         }`;
-      } else if (!inTitle && parsed.terms.length > 0) {
-        for (const { normalized } of attachmentOcrs) {
-          const ocrSnippet = buildOcrSnippet(normalized, parsed.terms);
+      } else if (!inTitle && termMatchers.length > 0) {
+        for (const ocr of attachmentOcrs) {
+          const ocrSnippet = buildRawOcrSnippet(ocr, termMatchers);
           if (ocrSnippet) {
             snippet = ocrSnippet;
             matchedIn = 'attachment';
@@ -1380,11 +1448,18 @@ export class NoteCacheService {
       }
 
       // Title matches receive highest priority, followed by body, then attachment OCR
-      const bodyHits = parsed.terms.filter((term) => bodyLower.includes(term)).length;
-      const attachmentHits =
-        attachmentOcrs.length > 0
-          ? parsed.terms.filter((term) => attachmentOcrs.some(({ lower }) => lower.includes(term))).length
-          : 0;
+      let attachmentHits = 0;
+      if (attachmentOcrs.length > 0) {
+        if (unmatchedMatchers.length === termMatchers.length) {
+          attachmentHits = termMatchers.length;
+        } else {
+          for (const m of termMatchers) {
+            if (unmatchedMatchers.includes(m) || attachmentOcrs.some((ocr) => m.ocr.test(ocr))) {
+              attachmentHits++;
+            }
+          }
+        }
+      }
       const relevanceScore = titleHits * 100 + bodyHits * 10 + attachmentHits;
 
       const matches: SearchResult['matches'] = {
@@ -1403,7 +1478,7 @@ export class NoteCacheService {
         createdTime: note.createdTime,
         updatedTime: note.updatedTime,
         deletedTime: note.deletedTime || 0,
-        preview: notePreview(note.body, markupLanguageOf(note.properties), 150),
+        preview: noteListPreview(note),
         isTodo: note.isTodo,
         todoCompleted: Boolean(note.todoCompleted),
         todoDue: note.todoDue,
@@ -1444,7 +1519,7 @@ export class NoteCacheService {
 
     const parts: string[] = [];
     let total = 0;
-    for (const resId of extractLinkedResourceIds(note.body)) {
+    for (const resId of noteLinkedResourceIds(note)) {
       const ocr = entry.resources.get(resId)?.ocrText?.trim();
       if (!ocr) continue;
       if (maxChars === undefined) {
@@ -1568,7 +1643,7 @@ export class NoteCacheService {
       createdTime: n.createdTime,
       updatedTime: n.updatedTime,
       deletedTime: n.deletedTime || 0,
-      preview: notePreview(n.body, markupLanguageOf(n.properties), 150),
+      preview: noteListPreview(n),
       isTodo: n.isTodo,
       todoCompleted: Boolean(n.todoCompleted),
       todoDue: n.todoDue,
@@ -1605,7 +1680,7 @@ export class NoteCacheService {
         continue;
       }
       if (!other.body || !other.body.includes(':/')) continue;
-      if (!extractLinkedResourceIds(other.body).includes(targetLower)) continue;
+      if (!noteLinkedResourceIds(other).includes(targetLower)) continue;
 
       const idx = other.body.toLowerCase().indexOf(`:/${targetLower}`);
       const start = Math.max(0, idx - 60);
@@ -1718,7 +1793,7 @@ export class NoteCacheService {
     if (isEncrypted(note) || !note.body) return [];
 
     const attachments: NoteAttachment[] = [];
-    for (const resId of extractLinkedResourceIds(note.body)) {
+    for (const resId of noteLinkedResourceIds(note)) {
       const res = entry.resources.get(resId);
       if (!res) continue;
       const ocrStatus =
@@ -1989,7 +2064,7 @@ export class NoteCacheService {
 
     const linkedResourcesOf = (n: RawJoplinItem): ResourceMetadata[] => {
       if (isEncrypted(n) || !n.body || !n.body.includes(':/')) return emptyResources;
-      const ids = extractLinkedResourceIds(n.body);
+      const ids = noteLinkedResourceIds(n);
       if (ids.length === 0) return emptyResources;
       const out: ResourceMetadata[] = [];
       for (const id of ids) {

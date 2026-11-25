@@ -354,6 +354,30 @@ export function matchesNamePattern(title: string, pattern: string): boolean {
 }
 
 const RESOURCE_LINK_RE = /(?:^|[\s("'<=]):\/([0-9a-fA-F]{32})(?![0-9a-fA-F])/g;
+const REGEX_META_RE = /[.*+?^${}()|[\]\\]/g;
+const OCR_SNIPPET_CONTEXT = 60;
+
+/** Precompiled case-insensitive matchers for a single lower-cased search term */
+export interface CompiledSearchTerm {
+  /** Lower-cased word or phrase as parsed by `parseSearchQuery` */
+  term: string;
+  /** Literal case-insensitive matcher for note titles and bodies */
+  text: RegExp;
+  /** Whitespace-tolerant case-insensitive matcher for raw OCR text (`\s+` between words) */
+  ocr: RegExp;
+}
+
+/**
+ * Compiles a search term once per query into case-insensitive Unicode regexes for matching raw
+ * note titles/bodies (literal spaces) and raw OCR text (spaces match any whitespace run `\s+`,
+ * equivalent to matching `normalizeOcrText` output).
+ */
+export function compileSearchTerm(term: string): CompiledSearchTerm {
+  const escaped = term.replace(REGEX_META_RE, '\\$&');
+  const text = new RegExp(escaped, 'iu');
+  const ocr = /\s/.test(term) ? new RegExp(escaped.replace(/\s+/g, '\\s+'), 'iu') : text;
+  return { term, text, ocr };
+}
 
 /**
  * Extracts linked Joplin item IDs (`:/<32-hex>`) from a Markdown or HTML note body in link
@@ -381,6 +405,93 @@ export function normalizeOcrText(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+function isWhitespaceAt(text: string, idx: number): boolean {
+  const code = text.charCodeAt(idx);
+  if (code === 32 || (code >= 9 && code <= 13)) return true;
+  if (code < 160) return false;
+  return /\s/.test(text[idx]);
+}
+
+/**
+ * Cuts a single-line snippet directly from raw OCR text using precompiled whitespace-tolerant
+ * matchers, producing the same output as `buildOcrSnippet(normalizeOcrText(rawOcr), terms)`
+ * without normalizing or lower-casing the entire OCR string.
+ */
+export function buildRawOcrSnippet(
+  rawOcr: string,
+  compiledTerms: readonly CompiledSearchTerm[]
+): string | null {
+  if (!rawOcr || compiledTerms.length === 0) return null;
+
+  let rawMatchIdx = -1;
+  let rawMatchLen = 0;
+  for (const compiled of compiledTerms) {
+    if (!compiled.term) continue;
+    const m = compiled.ocr.exec(rawOcr);
+    if (m && (rawMatchIdx === -1 || m.index < rawMatchIdx)) {
+      rawMatchIdx = m.index;
+      rawMatchLen = m[0].length;
+    }
+  }
+  if (rawMatchIdx === -1) return null;
+
+  // 60 chars of context plus 1 extra char to test whether the boundary lands mid-word
+  const limit = OCR_SNIPPET_CONTEXT + 1;
+
+  const prefixRev: string[] = [];
+  let i = rawMatchIdx - 1;
+  while (i >= 0 && prefixRev.length < limit) {
+    if (isWhitespaceAt(rawOcr, i)) {
+      while (i >= 0 && isWhitespaceAt(rawOcr, i)) i--;
+      if (i >= 0) prefixRev.push(' ');
+    } else {
+      prefixRev.push(rawOcr[i]);
+      i--;
+    }
+  }
+  const prefix = prefixRev.reverse().join('');
+
+  const suffixChars: string[] = [];
+  let j = rawMatchIdx + rawMatchLen;
+  while (j < rawOcr.length && suffixChars.length < limit) {
+    if (isWhitespaceAt(rawOcr, j)) {
+      while (j < rawOcr.length && isWhitespaceAt(rawOcr, j)) j++;
+      if (j < rawOcr.length) suffixChars.push(' ');
+    } else {
+      suffixChars.push(rawOcr[j]);
+      j++;
+    }
+  }
+  const suffix = suffixChars.join('');
+
+  let leftText = prefix;
+  let hasPrefixEllipsis = false;
+  if (prefix.length > OCR_SNIPPET_CONTEXT) {
+    hasPrefixEllipsis = true;
+    let leftStart = 1;
+    if (prefix[0] !== ' ') {
+      const nextSpace = prefix.indexOf(' ', 1);
+      if (nextSpace !== -1) leftStart = nextSpace + 1;
+    }
+    leftText = prefix.slice(leftStart);
+  }
+
+  let rightText = suffix;
+  let hasSuffixEllipsis = false;
+  if (suffix.length > OCR_SNIPPET_CONTEXT) {
+    hasSuffixEllipsis = true;
+    let rightEnd = OCR_SNIPPET_CONTEXT;
+    if (suffix[OCR_SNIPPET_CONTEXT] !== ' ') {
+      const prevSpace = suffix.lastIndexOf(' ', OCR_SNIPPET_CONTEXT);
+      if (prevSpace !== -1) rightEnd = prevSpace;
+    }
+    rightText = suffix.slice(0, rightEnd);
+  }
+
+  const normMatch = rawOcr.slice(rawMatchIdx, rawMatchIdx + rawMatchLen).replace(/\s+/g, ' ');
+  return `${hasPrefixEllipsis ? '...' : ''}${leftText}${normMatch}${rightText}${hasSuffixEllipsis ? '...' : ''}`;
+}
+
 /**
  * Cuts a short single-line snippet from normalized OCR text centered around the earliest matching
  * term, snapping to word boundaries when possible without clipping the match. Returns null when no
@@ -404,7 +515,7 @@ export function buildOcrSnippet(normalizedOcr: string, terms: string[]): string 
   } else {
     for (const term of terms) {
       if (!term) continue;
-      const m = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').exec(normalizedOcr);
+      const m = new RegExp(term.replace(REGEX_META_RE, '\\$&'), 'i').exec(normalizedOcr);
       if (m && (matchIdx === -1 || m.index < matchIdx)) {
         matchIdx = m.index;
         matchLength = m[0].length;
@@ -413,13 +524,13 @@ export function buildOcrSnippet(normalizedOcr: string, terms: string[]): string 
   }
   if (matchIdx === -1) return null;
 
-  let start = Math.max(0, matchIdx - 60);
+  let start = Math.max(0, matchIdx - OCR_SNIPPET_CONTEXT);
   if (start > 0 && normalizedOcr[start - 1] !== ' ') {
     const nextSpace = normalizedOcr.indexOf(' ', start);
     if (nextSpace !== -1 && nextSpace < matchIdx) start = nextSpace + 1;
   }
 
-  let end = Math.min(normalizedOcr.length, matchIdx + matchLength + 60);
+  let end = Math.min(normalizedOcr.length, matchIdx + matchLength + OCR_SNIPPET_CONTEXT);
   if (end < normalizedOcr.length && normalizedOcr[end] !== ' ') {
     const prevSpace = normalizedOcr.lastIndexOf(' ', end);
     if (prevSpace >= matchIdx + matchLength) end = prevSpace;
