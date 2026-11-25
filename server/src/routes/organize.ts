@@ -30,6 +30,13 @@ export function createOrganizeRouter(service: OrganizerService = organizerServic
     res.status(200).json(report);
   });
 
+  /** POST /api/organize/retitle { noteId } */
+  router.post('/retitle', async (req, res) => {
+    const noteId = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body.noteId : undefined;
+    const result = await service.suggestRetitle(req.sessionId!, noteId);
+    res.status(200).json(result);
+  });
+
   /**
    * GET /api/organize/jobs
    * Lists persisted and active Auto-organize jobs for the current user, newest first.
@@ -48,11 +55,14 @@ export function createOrganizeRouter(service: OrganizerService = organizerServic
       res.status(400).json({ error: 'Request body must be a JSON object' });
       return;
     }
-    const { noteIds, excludeNotebookIds } = req.body as {
+    const { noteIds, sourceNotebookIds, includeSubNotebooks, excludeNotebookIds, mode } = req.body as {
       noteIds?: unknown;
+      sourceNotebookIds?: unknown;
+      includeSubNotebooks?: unknown;
       excludeNotebookIds?: unknown;
+      mode?: unknown;
     };
-    const result = await service.startJob(req.sessionId!, { noteIds, excludeNotebookIds });
+    const result = await service.startJob(req.sessionId!, { noteIds, sourceNotebookIds, includeSubNotebooks, excludeNotebookIds, mode });
     res.status(201).json(result);
   });
 

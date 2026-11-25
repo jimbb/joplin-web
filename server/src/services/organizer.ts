@@ -11,6 +11,7 @@ import type {
   OrganizeFilter,
   OrganizeFilterCounts,
   OrganizeJobItem,
+  OrganizeJobMode,
   OrganizeJobResponse,
   OrganizeJobStatus,
   OrganizeJobSummary,
@@ -73,6 +74,16 @@ Rules:
 - "tags": At most 2 lowercase-hyphenated tags: first, exactly one document type from [${ORGANIZE_DOCUMENT_TYPE_TAGS.join(', ')}]; plus optionally one issuer tag (lowercase, hyphenated, e.g. "hsbc", "hang-seng", "john-lewis"). Existing account tags listed below may still be used when they clearly fit.
 - "confidence": Number from 0 to 1 reflecting your certainty (use < 0.7 when ambiguous or uncertain).
 - "documentDate": Document date formatted as "YYYY-MM-DD", or null if none is found.
+- "reason": One short English sentence explaining the suggestion.`;
+
+/** Smaller prompt used for retitle-only jobs and the editor's one-off suggestion. */
+export const RETITLE_SYSTEM_INSTRUCTIONS = `You suggest concise English titles for personal notes and scanned documents.
+Return ONLY a valid JSON object matching this exact schema:
+{ "title": string, "confidence": number, "reason": string }
+
+Rules:
+- "title": ALWAYS write titles in English. Documents use "YYYY-MM-DD Issuer – Document type" with an en-dash. Use the document date from the text, OCR, or filename, otherwise the note's created date. Keep titles concise (max ~80 characters) and NEVER include file extensions. Keep a meaningful descriptive current title unchanged.
+- "confidence": Number from 0 to 1 reflecting certainty.
 - "reason": One short English sentence explaining the suggestion.`;
 
 const MAX_BODY_CHARS = 2000;
@@ -140,6 +151,7 @@ interface InternalJobItem extends OrganizeJobItem {
 
 interface InternalOrganizeJob {
   id: string;
+  mode: OrganizeJobMode;
   ownerKey: string;
   status: OrganizeJobStatus;
   error?: string;
@@ -394,6 +406,7 @@ function computeJobSummary(job: InternalOrganizeJob): OrganizeJobSummary {
   }
   return {
     id: job.id,
+    mode: job.mode ?? 'organize',
     status: job.status,
     ...(job.error ? { error: job.error } : {}),
     progress: {
@@ -418,6 +431,7 @@ function sortSummariesNewestFirst(summaries: OrganizeJobSummary[]): void {
 }
 
 function normalizeLoadedJob(raw: InternalOrganizeJob): InternalOrganizeJob {
+  if (raw.mode !== 'retitle') raw.mode = 'organize';
   for (const item of raw.items) {
     if (item.status === 'running') {
       item.status = 'pending';
@@ -769,6 +783,25 @@ export function buildOrganizeUserPrompt(input: {
   return lines.join('\n');
 }
 
+export function buildRetitleUserPrompt(input: {
+  currentTitle: string;
+  createdDate: string;
+  bodyText: string;
+  attachmentFilenames: string[];
+  ocrText: string;
+}): string {
+  return [
+    `Current title: ${sanitizeLine(input.currentTitle) || '(untitled)'}`,
+    `Created date: ${input.createdDate}`,
+    'Body text:',
+    input.bodyText || '(empty)',
+    'Attachment filenames:',
+    input.attachmentFilenames.length > 0 ? input.attachmentFilenames.join(', ') : '(none)',
+    'Attachment OCR text:',
+    input.ocrText || '(none)',
+  ].join('\n');
+}
+
 function unwrapJsonContent(raw: string): string {
   const trimmed = raw.trim();
   const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed);
@@ -915,6 +948,44 @@ export function parseAndValidateSuggestion(
       confidence,
       documentDate: obj.documentDate,
       reason: validNotebook ? reason : `${reason} (Kept current notebook: suggested destination unavailable.)`.slice(0, MAX_REASON_CHARS),
+    },
+  };
+}
+
+export function parseAndValidateRetitleSuggestion(
+  rawContent: string,
+  context: { currentTitle: string }
+): ValidationOutcome | ValidationFailure {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(unwrapJsonContent(rawContent));
+  } catch {
+    return { ok: false, error: 'Output is not valid JSON' };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, error: 'JSON root must be an object' };
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (typeof obj.title !== 'string' || !sanitizeLine(obj.title)) {
+    return { ok: false, error: '"title" must be a non-empty string' };
+  }
+  if (typeof obj.confidence !== 'number' || !Number.isFinite(obj.confidence) || obj.confidence < 0 || obj.confidence > 1) {
+    return { ok: false, error: '"confidence" must be a finite number between 0 and 1' };
+  }
+  if (typeof obj.reason !== 'string' || !sanitizeLine(obj.reason)) {
+    return { ok: false, error: '"reason" must be a non-empty string' };
+  }
+  const title = normalizeSuggestedTitle(obj.title, context.currentTitle);
+  const reason = sanitizeLine(obj.reason);
+  return {
+    ok: true,
+    suggestion: {
+      title,
+      notebookId: '',
+      tags: [],
+      confidence: Math.round(obj.confidence * 100) / 100,
+      documentDate: null,
+      reason: reason.length > MAX_REASON_CHARS ? `${reason.slice(0, MAX_REASON_CHARS - 1).trimEnd()}…` : reason,
     },
   };
 }
@@ -1144,6 +1215,19 @@ export function createFakeCompletionClient(
     const combinedLower = combined.toLowerCase();
     const documentDate = extractDocumentDate(`${ocrText}\n${bodyText}\n${currentTitle}`);
     const datePrefix = documentDate ?? createdDate;
+
+    if (systemMsg === RETITLE_SYSTEM_INSTRUCTIONS) {
+      const firstMeaningfulLine = sanitizeLine((ocrText || bodyText).split('\n').find((line) => line.trim().length >= 3) ?? '');
+      const shortSubject = firstMeaningfulLine.slice(0, 48).replace(DOC_EXTENSION_RE, '').trim();
+      const title = isScannerStyleTitle(currentTitle) && shortSubject
+        ? `${datePrefix} ${shortSubject} – Document`
+        : currentTitle;
+      const suggestion = { title, confidence: ocrText ? 0.86 : 0.62, reason: ocrText ? 'Generated a concise title from attachment OCR.' : 'Kept the existing meaningful title.' };
+      const promptTokens = Math.max(80, Math.round((systemMsg.length + userMsg.length) / 4));
+      const content = JSON.stringify(suggestion);
+      const completionTokens = Math.max(20, Math.round(content.length / 4));
+      return { content, usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens } };
+    }
 
     // Pick destination notebook from allowed list based on keywords
     const pickNotebook = (patterns: RegExp[], avoidCurrent = true): string => {
@@ -1543,6 +1627,7 @@ export class OrganizerService {
         (s): s is OrganizeJobSummary =>
           Boolean(s && typeof s.id === 'string' && SAFE_JOB_ID_RE.test(s.id) && typeof s.status === 'string')
       );
+      for (const summary of summaries) summary.mode = summary.mode === 'retitle' ? 'retitle' : 'organize';
       sortSummariesNewestFirst(summaries);
       return summaries;
     } catch {
@@ -1806,10 +1891,62 @@ export class OrganizerService {
     return {
       jobs: state.summaries.map((s) => ({
         ...s,
+        mode: s.mode === 'retitle' ? 'retitle' : 'organize',
         progress: { ...s.progress },
         usage: { ...s.usage },
       })),
     };
+  }
+
+  /** Suggests a title for one editable note without creating a persisted job. */
+  public async suggestRetitle(sessionId: string, noteId: unknown): Promise<{ title: string }> {
+    if (!this.isEnabled()) throw new OrganizeValidationError('Auto-organize is not configured on this server', 503);
+    if (typeof noteId !== 'string') throw new OrganizeValidationError('noteId is required');
+    assertValidId(noteId, 'note id');
+    const entry = await noteCache.ensureFresh(sessionId, 'stale-ok');
+    const note = entry.notes.get(noteId);
+    if (!note) throw new OrganizeValidationError(`Note not found: ${noteId}`, 404);
+    if (note.properties.encryption_applied === '1') {
+      throw new OrganizeValidationError('Encrypted notes cannot be read or retitled', 422);
+    }
+    const bodyText = stripLinksFromBody(note.body, markupLanguageOf(note.properties), MAX_BODY_CHARS);
+    const attachmentFilenames: string[] = [];
+    const seenFilenames = new Set<string>();
+    for (const resId of extractLinkedResourceIds(note.body)) {
+      const res = entry.resources.get(resId);
+      const filename = sanitizeLine(res?.filename || res?.title || '');
+      if (filename && !seenFilenames.has(filename)) {
+        seenFilenames.add(filename);
+        attachmentFilenames.push(filename);
+      }
+    }
+    const ocrText = await noteCache.getNoteAttachmentText(sessionId, note.id, { maxChars: MAX_OCR_CHARS });
+    const messages: LlmMessage[] = [
+      { role: 'system', content: RETITLE_SYSTEM_INSTRUCTIONS },
+      {
+        role: 'user',
+        content: buildRetitleUserPrompt({
+          currentTitle: note.title,
+          createdDate: formatIsoDate(note.createdTime || note.updatedTime),
+          bodyText,
+          attachmentFilenames,
+          ocrText,
+        }),
+      },
+    ];
+    const completion = this.getCompletionClient();
+    const first = await completion(messages, new AbortController().signal);
+    let parsed = parseAndValidateRetitleSuggestion(first.content, { currentTitle: note.title });
+    if (!parsed.ok) {
+      const repair = await completion([
+        ...messages,
+        { role: 'assistant', content: first.content },
+        { role: 'user', content: `Your previous response was invalid (${parsed.error}). Reply ONLY with { "title": string, "confidence": number, "reason": string }.` },
+      ], new AbortController().signal);
+      parsed = parseAndValidateRetitleSuggestion(repair.content, { currentTitle: note.title });
+    }
+    if (!parsed.ok) throw new OrganizeValidationError('Model returned invalid title suggestion', 502);
+    return { title: parsed.suggestion.title };
   }
 
   /**
@@ -1818,29 +1955,42 @@ export class OrganizerService {
    */
   public async startJob(
     sessionId: string,
-    input: { noteIds?: unknown; excludeNotebookIds?: unknown }
+    input: {
+      noteIds?: unknown;
+      sourceNotebookIds?: unknown;
+      includeSubNotebooks?: unknown;
+      excludeNotebookIds?: unknown;
+      mode?: unknown;
+    }
   ): Promise<{ jobId: string }> {
     if (!this.isEnabled()) {
       throw new OrganizeValidationError('Auto-organize is not configured on this server', 503);
     }
     const ownerKey = this.attachSession(sessionId);
 
-    if (!Array.isArray(input.noteIds) || input.noteIds.length === 0) {
-      throw new OrganizeValidationError('noteIds must be a non-empty array');
+    const hasNoteIds = input.noteIds !== undefined;
+    const hasSourceScope = input.sourceNotebookIds !== undefined;
+    if (hasNoteIds === hasSourceScope) {
+      throw new OrganizeValidationError('Provide exactly one of noteIds or sourceNotebookIds');
     }
-    if (input.noteIds.length > MAX_ORGANIZE_NOTES) {
-      throw new OrganizeValidationError(`Cannot auto-organize more than ${MAX_ORGANIZE_NOTES} notes per job`);
+    const mode: OrganizeJobMode = input.mode === undefined ? 'organize' : input.mode === 'retitle' ? 'retitle' : input.mode === 'organize' ? 'organize' : (() => { throw new OrganizeValidationError('mode must be organize or retitle'); })();
+    if (input.includeSubNotebooks !== undefined && typeof input.includeSubNotebooks !== 'boolean') {
+      throw new OrganizeValidationError('includeSubNotebooks must be a boolean');
     }
+    const includeSubNotebooks = input.includeSubNotebooks !== false;
     const uniqueNoteIds: string[] = [];
     const seenNoteIds = new Set<string>();
-    for (const rawId of input.noteIds) {
-      if (typeof rawId !== 'string') {
-        throw new OrganizeValidationError('noteIds must contain strings only');
+    if (hasNoteIds) {
+      if (!Array.isArray(input.noteIds) || input.noteIds.length === 0) {
+        throw new OrganizeValidationError('noteIds must be a non-empty array');
       }
-      assertValidId(rawId, 'note id');
-      if (!seenNoteIds.has(rawId)) {
-        seenNoteIds.add(rawId);
-        uniqueNoteIds.push(rawId);
+      if (input.noteIds.length > MAX_ORGANIZE_NOTES) {
+        throw new OrganizeValidationError(`Cannot auto-organize more than ${MAX_ORGANIZE_NOTES} notes per job`);
+      }
+      for (const rawId of input.noteIds) {
+        if (typeof rawId !== 'string') throw new OrganizeValidationError('noteIds must contain strings only');
+        assertValidId(rawId, 'note id');
+        if (!seenNoteIds.has(rawId)) { seenNoteIds.add(rawId); uniqueNoteIds.push(rawId); }
       }
     }
 
@@ -1872,6 +2022,43 @@ export class OrganizerService {
     }
 
     const entry = await noteCache.ensureFresh(sessionId, 'stale-ok');
+    if (hasSourceScope) {
+      if (!Array.isArray(input.sourceNotebookIds) || !input.sourceNotebookIds.every((id) => typeof id === 'string')) {
+        throw new OrganizeValidationError('sourceNotebookIds must be an array of notebook ids');
+      }
+      if (input.sourceNotebookIds.length > MAX_EXCLUDED_NOTEBOOKS) {
+        throw new OrganizeValidationError(`Cannot select more than ${MAX_EXCLUDED_NOTEBOOKS} source notebooks`);
+      }
+      const sourceIds = new Set<string>();
+      for (const rawId of input.sourceNotebookIds) {
+        assertValidId(rawId, 'notebook id');
+        if (!entry.notebooks.has(rawId)) throw new OrganizeValidationError(`Notebook not found: ${rawId}`);
+        sourceIds.add(rawId);
+      }
+      const selected = new Set<string>(sourceIds);
+      if (includeSubNotebooks && sourceIds.size > 0) {
+        let changed = true;
+        while (changed) {
+          changed = false;
+          for (const notebook of entry.notebooks.values()) {
+            if (notebook.parentId && selected.has(notebook.parentId) && !selected.has(notebook.id)) {
+              selected.add(notebook.id);
+              changed = true;
+            }
+          }
+        }
+      }
+      for (const note of entry.notes.values()) {
+        if ((sourceIds.size === 0 || (note.parentId && selected.has(note.parentId))) && note.deletedTime === 0 && note.parentId && !isNotebookTrashed(entry, note.parentId) && !isConflictNote(note) && note.properties.encryption_applied !== '1') {
+          seenNoteIds.add(note.id);
+          uniqueNoteIds.push(note.id);
+        }
+      }
+      if (uniqueNoteIds.length > MAX_ORGANIZE_NOTES) {
+        throw new OrganizeValidationError(`Scope matched ${uniqueNoteIds.length} notes, exceeding the maximum of ${MAX_ORGANIZE_NOTES}`);
+      }
+      if (uniqueNoteIds.length === 0) throw new OrganizeValidationError('The selected scope contains no active notes');
+    }
     // A second request (double click, other tab) may have started a job while the cache refreshed.
     const startedMeanwhile = this.findRunningJobId(ownerKey, state);
     if (startedMeanwhile) {
@@ -1881,7 +2068,9 @@ export class OrganizerService {
         { runningJobId: startedMeanwhile }
       );
     }
-    const { systemPrompt, allowedNotebookIds, pathById } = buildOrganizeSystemPrompt(entry, excludeSet);
+    const { systemPrompt, allowedNotebookIds, pathById } = mode === 'retitle'
+      ? { systemPrompt: RETITLE_SYSTEM_INSTRUCTIONS, allowedNotebookIds: [], pathById: buildNotebookPaths(entry).pathById }
+      : buildOrganizeSystemPrompt(entry, excludeSet);
 
     const items: InternalJobItem[] = uniqueNoteIds.map((noteId) => {
       const note = entry.notes.get(noteId);
@@ -1935,6 +2124,7 @@ export class OrganizerService {
     const createdAt = Math.max(Date.now(), (state.summaries[0]?.createdAt ?? 0) + 1);
     const job: InternalOrganizeJob = {
       id: randomUUID().replace(/-/g, ''),
+      mode,
       ownerKey,
       status: hasPending ? 'running' : 'done',
       excludeNotebookIds: [...excludeSet],
@@ -1951,10 +2141,10 @@ export class OrganizerService {
     this.saveJobNow(ownerKey, job.id);
 
     if (hasPending) {
-      const similarityIndex = buildNoteSimilarityIndex(entry, {
+      const similarityIndex = mode === 'organize' ? buildNoteSimilarityIndex(entry, {
         excludeNotebookIds: excludeSet,
         excludeNoteIds: seenNoteIds,
-      });
+      }) : undefined;
       this.startWorkerLoop(ownerKey, job, sessionId, undefined, similarityIndex);
     } else {
       this.markJobAccessed(ownerKey, state, job);
@@ -2085,17 +2275,25 @@ export class OrganizerService {
                 return;
               }
 
-              const similarNotes = ocrText.trim() ? index.findSimilar(ocrText, MAX_SIMILAR_NOTES) : [];
-              const userPrompt = buildOrganizeUserPrompt({
-                currentTitle: note.title,
-                currentNotebookId: note.parentId || '',
-                currentNotebookPath: item.currentNotebookPath,
-                createdDate: formatIsoDate(note.createdTime || note.updatedTime),
-                bodyText,
-                attachmentFilenames,
-                ocrText,
-                similarNotes,
-              });
+              const similarNotes = job.mode === 'organize' && ocrText.trim() ? index.findSimilar(ocrText, MAX_SIMILAR_NOTES) : [];
+              const userPrompt = job.mode === 'retitle'
+                ? buildRetitleUserPrompt({
+                    currentTitle: note.title,
+                    createdDate: formatIsoDate(note.createdTime || note.updatedTime),
+                    bodyText,
+                    attachmentFilenames,
+                    ocrText,
+                  })
+                : buildOrganizeUserPrompt({
+                    currentTitle: note.title,
+                    currentNotebookId: note.parentId || '',
+                    currentNotebookPath: item.currentNotebookPath,
+                    createdDate: formatIsoDate(note.createdTime || note.updatedTime),
+                    bodyText,
+                    attachmentFilenames,
+                    ocrText,
+                    similarNotes,
+                  });
 
               const messages: LlmMessage[] = [
                 { role: 'system', content: job.systemPrompt },
@@ -2115,11 +2313,13 @@ export class OrganizerService {
               const firstResult = await completionFn(messages, controller.signal);
               addUsage(firstResult.usage);
 
-              let validation = parseAndValidateSuggestion(firstResult.content, {
-                currentTitle: note.title,
-                currentNotebookId: note.parentId || '',
-                allowedNotebookIds: allowedSet,
-              });
+              let validation = job.mode === 'retitle'
+                ? parseAndValidateRetitleSuggestion(firstResult.content, { currentTitle: note.title })
+                : parseAndValidateSuggestion(firstResult.content, {
+                    currentTitle: note.title,
+                    currentNotebookId: note.parentId || '',
+                    allowedNotebookIds: allowedSet,
+                  });
 
               if (!validation.ok) {
                 if (controller.signal.aborted || job.status !== 'running') {
@@ -2131,16 +2331,20 @@ export class OrganizerService {
                   { role: 'assistant', content: firstResult.content },
                   {
                     role: 'user',
-                    content: `Your previous response was invalid (${validation.error}). Reply ONLY with a valid JSON object matching { "title": string, "notebookId": string, "tags": string[], "confidence": number, "documentDate": "YYYY-MM-DD" | null, "reason": string }.`,
+                    content: job.mode === 'retitle'
+                      ? `Your previous response was invalid (${validation.error}). Reply ONLY with a valid JSON object matching { "title": string, "confidence": number, "reason": string }.`
+                      : `Your previous response was invalid (${validation.error}). Reply ONLY with a valid JSON object matching { "title": string, "notebookId": string, "tags": string[], "confidence": number, "documentDate": "YYYY-MM-DD" | null, "reason": string }.`,
                   },
                 ];
                 const repairResult = await completionFn(repairMessages, controller.signal);
                 addUsage(repairResult.usage);
-                validation = parseAndValidateSuggestion(repairResult.content, {
-                  currentTitle: note.title,
-                  currentNotebookId: note.parentId || '',
-                  allowedNotebookIds: allowedSet,
-                });
+                validation = job.mode === 'retitle'
+                  ? parseAndValidateRetitleSuggestion(repairResult.content, { currentTitle: note.title })
+                  : parseAndValidateSuggestion(repairResult.content, {
+                      currentTitle: note.title,
+                      currentNotebookId: note.parentId || '',
+                      allowedNotebookIds: allowedSet,
+                    });
               }
 
               if (!validation.ok) {
@@ -2151,6 +2355,7 @@ export class OrganizerService {
                 delete item.error;
                 delete item.skipped;
                 item.suggestion = validation.suggestion;
+                item.unchanged = job.mode === 'retitle' && validation.suggestion.title === sanitizeLine(note.title);
               }
             } catch (err) {
               if (controller.signal.aborted) {
@@ -2285,7 +2490,7 @@ export class OrganizerService {
       if (item.applied) appliedCount++;
 
       let matchesFilter = filter === 'all';
-      if (item.status === 'done' && item.suggestion) {
+      if (item.status === 'done' && item.suggestion && !item.unchanged) {
         // Unapplied suggestions for notes trashed since the job ran can never be applied: keep them out
         // of the "left to apply" counts so the numbers reach zero once everything applicable is done.
         const gone = !item.applied && isNoteGone(entry, item.noteId);
@@ -2350,6 +2555,7 @@ export class OrganizerService {
 
     return {
       id: job.id,
+      mode: job.mode ?? 'organize',
       status: job.status,
       ...(job.error ? { error: job.error } : {}),
       excludeNotebookIds: [...job.excludeNotebookIds],
@@ -2485,7 +2691,9 @@ export class OrganizerService {
 
     const entry = await noteCache.ensureFresh(sessionId, 'stale-ok');
     const excludeSet = new Set(job.excludeNotebookIds);
-    const { systemPrompt, allowedNotebookIds, pathById } = buildOrganizeSystemPrompt(entry, excludeSet);
+    const { systemPrompt, allowedNotebookIds, pathById } = job.mode === 'retitle'
+      ? { systemPrompt: RETITLE_SYSTEM_INSTRUCTIONS, allowedNotebookIds: [], pathById: buildNotebookPaths(entry).pathById }
+      : buildOrganizeSystemPrompt(entry, excludeSet);
 
     const retryTargets: Array<{ item: InternalJobItem; liveNote: RawJoplinItem }> = [];
     const liveSkipUpdates: Array<{ item: InternalJobItem; reason: string }> = [];
@@ -2539,10 +2747,10 @@ export class OrganizerService {
 
     this.saveJobNow(ownerKey, job.id);
 
-    const similarityIndex = buildNoteSimilarityIndex(entry, {
+    const similarityIndex = job.mode === 'organize' ? buildNoteSimilarityIndex(entry, {
       excludeNotebookIds: excludeSet,
       excludeNoteIds: new Set(job.items.map((it) => it.noteId)),
-    });
+    }) : undefined;
     this.startWorkerLoop(ownerKey, job, sessionId, undefined, similarityIndex);
 
     return {
@@ -2624,7 +2832,7 @@ export class OrganizerService {
     const entry = await noteCache.getEntry(sessionId);
     const jobItemMap = new Map(job.items.map((it) => [it.noteId, it]));
     // Re-applying an applied row would snapshot the AI title as the "previous" one and break undo.
-    const inputs = parsedInputs.filter((inp) => !jobItemMap.get(inp.noteId)?.applied);
+    const inputs = parsedInputs.filter((inp) => !jobItemMap.get(inp.noteId)?.applied && !jobItemMap.get(inp.noteId)?.unchanged);
     const needsSuggestionTags = inputs.some((inp) => inp.useSuggestion && inp.addTags === undefined);
     const keepTag = needsSuggestionTags
       ? recurringTagFilter(
@@ -2642,14 +2850,16 @@ export class OrganizerService {
       }
       const suggestion = inp.useSuggestion ? jobItem!.suggestion! : undefined;
       const effectiveTitle = inp.title !== undefined ? inp.title : suggestion?.title;
-      const effectiveNotebookId =
-        inp.notebookId !== undefined
+      const effectiveNotebookId = job.mode === 'retitle'
+        ? undefined
+        : inp.notebookId !== undefined
           ? inp.notebookId
           : suggestion?.notebookId
-          ? suggestion.notebookId
-          : undefined;
-      const effectiveAddTags =
-        inp.addTags !== undefined ? inp.addTags : suggestion ? suggestion.tags.filter(keepTag!) : undefined;
+            ? suggestion.notebookId
+            : undefined;
+      const effectiveAddTags = job.mode === 'retitle'
+        ? undefined
+        : inp.addTags !== undefined ? inp.addTags : suggestion ? suggestion.tags.filter(keepTag!) : undefined;
 
       const prevTitle = liveNote?.title ?? jobItem?.currentTitle ?? '';
       const prevParentId = liveNote?.parentId ?? jobItem?.currentNotebookId ?? '';

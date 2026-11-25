@@ -13,6 +13,7 @@ import {
   Mic,
   Paperclip,
   PencilLine,
+  Sparkles,
   Type,
 } from "lucide-react";
 import { MARKUP_HTML, Note } from "@/lib/types";
@@ -40,6 +41,8 @@ import { getConnectionSnapshot, isTemporaryFailure, setNoteUnsaved } from "@/lib
 import { createRetryScheduler, RetryScheduler } from "@/lib/retry";
 import { clearDraft, saveDraft, StoredDraft } from "@/lib/drafts";
 import { asSentence } from "@/lib/format";
+import { suggestNoteTitle } from "@/lib/api";
+import { useOrganizeStatus } from "@/hooks/use-organize";
 
 const AUTOSAVE_DELAY_MS = 1500;
 const MODE_STORAGE_KEY = "joplin-editor-mode";
@@ -110,6 +113,8 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
   const [editorKey, setEditorKey] = useState(0);
   const [uploadCount, setUploadCount] = useState(0);
   const [voiceModalOpen, setVoiceModalOpen] = useState(false);
+  const [titleSuggestion, setTitleSuggestion] = useState<string | null>(null);
+  const [titleSuggestionLoading, setTitleSuggestionLoading] = useState(false);
   const editorRef = useRef<MarkdownEditorHandle>(null);
   const richEditorRef = useRef<RichEditorHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -131,6 +136,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
   const deferredBody = useDeferredValue(draft.body);
   // HTML notes (Web Clipper) are edited as raw HTML, like in Joplin desktop; saving keeps markup_language
   const isHtml = note.markupLanguage === MARKUP_HTML;
+  const { data: organizeStatus } = useOrganizeStatus();
 
   const clearTimer = () => {
     if (timerRef.current !== null) {
@@ -629,9 +635,10 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
 
       {/* Title */}
       <div className="px-4 sm:px-10 lg:px-12 pt-6 pb-2">
-        <input
-          value={draft.title}
-          onChange={(e) => updateDraft({ title: e.target.value })}
+        <div className="flex items-center gap-2">
+          <input
+            value={draft.title}
+            onChange={(e) => updateDraft({ title: e.target.value })}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
@@ -644,14 +651,48 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
               }, 0);
             }
           }}
-          autoFocus={focusTitle}
-          placeholder="Untitled"
-          aria-label="Note title"
-          className={cn(
-            "w-full block bg-transparent text-2xl sm:text-3xl font-bold tracking-tight text-foreground placeholder:text-muted-foreground outline-hidden",
-            effectiveMode !== "split" && "max-w-4xl mx-auto"
+            autoFocus={focusTitle}
+            placeholder="Untitled"
+            aria-label="Note title"
+            className={cn(
+              "min-w-0 flex-1 block bg-transparent text-2xl sm:text-3xl font-bold tracking-tight text-foreground placeholder:text-muted-foreground outline-hidden",
+              effectiveMode !== "split" && "max-w-4xl"
+            )}
+          />
+          {organizeStatus?.enabled && !note.encrypted && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8 shrink-0 gap-1 text-xs text-muted-foreground"
+              disabled={titleSuggestionLoading}
+              onClick={async () => {
+                setTitleSuggestionLoading(true);
+                try {
+                  const result = await suggestNoteTitle(note.id);
+                  setTitleSuggestion(result.title);
+                } catch (err) {
+                  toast.error("Could not suggest a title", { description: err instanceof Error ? err.message : undefined });
+                } finally {
+                  setTitleSuggestionLoading(false);
+                }
+              }}
+              aria-label="Suggest title"
+              title="Suggest title"
+            >
+              {titleSuggestionLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+              <span className="hidden sm:inline">Suggest title</span>
+            </Button>
           )}
-        />
+        </div>
+        {titleSuggestion && (
+          <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
+            <span className="text-muted-foreground">Suggested title</span>
+            <span className="font-medium text-foreground">{titleSuggestion}</span>
+            <Button type="button" size="sm" className="ml-auto h-7 px-2 text-xs" onClick={() => { updateDraft({ title: titleSuggestion }); setTitleSuggestion(null); }}>Accept</Button>
+            <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setTitleSuggestion(null)}>Dismiss</Button>
+          </div>
+        )}
         <div className={cn("pt-2 text-xs text-muted-foreground", effectiveMode !== "split" && "max-w-4xl mx-auto")}>
           <TagEditor noteId={note.id} tags={note.tags ?? []} />
         </div>

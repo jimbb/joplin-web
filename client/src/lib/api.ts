@@ -20,6 +20,7 @@ import {
   OrganizeDeleteResponse,
   OrganizeFilter,
   OrganizeJobResponse,
+  OrganizeJobMode,
   OrganizeJobStatus,
   OrganizeJobSummary,
   OrganizeRetryResponse,
@@ -909,12 +910,22 @@ export function getOrganizeRunningJobId(error: unknown): string | null {
  * Starts a server-side Auto-organize job for the selected note IDs.
  */
 export async function createOrganizeJob(payload: {
-  noteIds: string[];
+  noteIds?: string[];
+  sourceNotebookIds?: string[];
+  includeSubNotebooks?: boolean;
   excludeNotebookIds?: string[];
+  mode?: OrganizeJobMode;
 }): Promise<{ jobId: string }> {
   return request<{ jobId: string }>("/api/organize/jobs", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export async function suggestNoteTitle(noteId: string): Promise<{ title: string }> {
+  return request<{ title: string }>("/api/organize/retitle", {
+    method: "POST",
+    body: JSON.stringify({ noteId }),
   });
 }
 
