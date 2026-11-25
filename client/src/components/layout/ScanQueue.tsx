@@ -1,6 +1,6 @@
 import { forwardRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { ScanLine } from "lucide-react";
+import { Check, ScanLine } from "lucide-react";
 import type { ScanCycle, ScanJob, ScanStatus } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -37,7 +37,7 @@ function cycleSummary(cycle: ScanCycle | undefined): string {
   }
   if (cycle.phase === "sync") return "Syncing with Joplin Server";
   if (cycle.phase === "import") return "Importing";
-  if (cycle.phase === "ocr") return `OCR: ${cycle.ocrDone} of ${cycle.ocrTotal} attachments`;
+  if (cycle.phase === "ocr") return `${cycle.ocrDone} of ${cycle.ocrTotal} attachments`;
   if (cycle.phase === "upload") return "Uploading";
   return "Importing";
 }
@@ -70,7 +70,16 @@ function JobSteps({ job }: { job: ScanJob }) {
     <div className="mt-2 flex items-center gap-1 text-[10px] font-medium text-muted-foreground" aria-label="Import, OCR, Sync, Done">
       {["Import", "OCR", "Sync", "Done"].map((step, index) => (
         <span key={step} className="flex items-center gap-1">
-          <span className={cn("rounded-full border px-1.5 py-0.5", index === active && "border-primary bg-primary/10 text-primary", index < active && "border-primary/40 text-primary/80")}>
+          <span
+            data-step={step}
+            data-complete={index < active ? "true" : "false"}
+            className={cn(
+              "inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5",
+              index === active && "border-primary bg-primary/10 text-primary",
+              index < active && "border-border/60 bg-muted text-muted-foreground"
+            )}
+          >
+            {index < active && <Check className="h-2.5 w-2.5" aria-hidden="true" />}
             {step}
           </span>
           {index < 3 && <span className="text-border">→</span>}

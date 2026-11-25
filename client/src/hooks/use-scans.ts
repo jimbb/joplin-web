@@ -22,6 +22,12 @@ function jobsById(data: ScanStatus): Map<string, ScanJob> {
   return new Map(jobs.map((job) => [job.id, job]));
 }
 
+/** Poll interval selected from the latest answer. */
+export function scanRefetchInterval(data: ScanStatus | undefined): number | false {
+  if (!data || data.enabled === false) return false;
+  return (data.active ?? 0) > 0 || data.cycle?.running ? 3_000 : 30_000;
+}
+
 /** Polls scan status lightly while work is active and reports completed scans once per transition. */
 export function useScans() {
   const { isAuthenticated } = useAuth();
@@ -37,11 +43,7 @@ export function useScans() {
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     refetchIntervalInBackground: false,
-    refetchInterval: (current) => {
-      const data = current.state.data as ScanStatus | undefined;
-      if (!data || data.enabled === false) return false;
-      return (data.active ?? 0) > 0 || data.cycle?.running ? 3_000 : 30_000;
-    },
+    refetchInterval: (current) => scanRefetchInterval(current.state.data as ScanStatus | undefined),
   });
 
   useEffect(() => {
