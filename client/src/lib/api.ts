@@ -54,7 +54,7 @@ import type {
   RegistrationResponseJSON,
   AuthenticationResponseJSON,
 } from "@simplewebauthn/browser";
-import { changePendingWrites, recordNetworkError, recordResponse } from "./connection";
+import { changePendingWrites, recordNetworkError, recordResponse, recordSignInRedirect } from "./connection";
 
 /**
  * The session token lives in an httpOnly cookie set by the backend: scripts can't read it. Only the
@@ -71,11 +71,25 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
 /**
  * Options for every API request: send the session cookie, and send the Origin header the backend's
  * CSRF check needs (the page's Referrer-Policy is no-referrer, which would turn it into "null").
+ * Redirects are not followed: the API never redirects, so a redirect comes from a sign-in proxy in
+ * front of Joplin Web (e.g. Cloudflare Access), see checkSignInRedirect.
  */
 const SESSION_FETCH_OPTIONS: RequestInit = {
   credentials: "include",
   referrerPolicy: "same-origin",
+  redirect: "manual",
 };
+
+/**
+ * Fails a request that a sign-in proxy redirected to its login page (its session ran out while the
+ * app was open, e.g. an installed app resumed the next day). fetch can't show that page, only a
+ * page load can, so the connection banner offers a reload.
+ */
+function checkSignInRedirect(response: Response): void {
+  if (response.type !== "opaqueredirect") return;
+  recordSignInRedirect();
+  throw new ApiError(0, "Sign-in required. Reload the page to sign in again.");
+}
 
 function removeStorageKey(key: string): void {
   try {
@@ -238,6 +252,7 @@ async function send<T>(endpoint: string, init: RequestInit, skipAuthRedirect: bo
     recordNetworkError(message);
     throw new ApiError(0, message);
   }
+  checkSignInRedirect(response);
 
   if (!response.ok) {
     const { message, data } = await readErrorMessage(response);
@@ -732,6 +747,7 @@ export function onClearResourceCache(clearer: () => void): () => void {
  */
 async function fetchResource(resourceId: string, query = ""): Promise<Response> {
   const response = await fetch(`${API_BASE_URL}/api/resources/${resourceId}${query}`, SESSION_FETCH_OPTIONS);
+  checkSignInRedirect(response);
   if (!response.ok) {
     throw new ApiError(response.status, `Could not load resource (HTTP ${response.status})`);
   }

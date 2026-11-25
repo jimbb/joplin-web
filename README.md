@@ -75,6 +75,7 @@ In short: choose Joplin Web if you want quick, install-free access to your notes
 | 🔐 **Two-factor authentication** | Optional WebAuthn passkeys and authenticator apps (TOTP), single-use recovery codes, and 30-day trusted devices (with optional `REQUIRE_2FA` enforcement). |
 | 🌗 **Light & dark mode** | Switch themes with one click. |
 | 📱 **Responsive** | Works on phones and tablets as well as on the desktop. |
+| 📲 **Installable app** | Install it like an app from Chrome or Edge, or add it to the Home Screen on iPhone and iPad: it opens in its own window with its own icon. Notes still come live from your server. |
 
 ## Screenshots
 
@@ -223,6 +224,16 @@ npm --prefix client run dev      # terminal 2
 ```
 
 Open `http://localhost:5173` and sign in with `demo@joplin-web.test` / `demo`. Everything stays in memory and disappears when you stop the demo.
+
+### Install as an app
+
+Joplin Web is a Progressive Web App. Over HTTPS (or on `localhost`) you can install it:
+
+- **Chrome or Edge on the desktop:** click the install icon at the right of the address bar, or choose *Install Joplin Web…* in the browser menu (Edge: *Apps* → *Install this site as an app*).
+- **Android (Chrome):** menu → *Add to Home screen* → *Install*.
+- **iPhone and iPad (Safari, or Chrome on iOS 16.4+):** Share → *Add to Home Screen*. An app added to the Home Screen has its own storage, so you sign in once more inside it.
+
+The app shows an offline page when your server can't be reached; it keeps no notes for offline use. It also works behind a sign-in proxy such as Cloudflare Access: the manifest is requested with cookies, and when the proxy's sign-in runs out while the app is open, a banner offers to reload and sign in again.
 
 ### Current limitations
 
