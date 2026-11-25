@@ -242,6 +242,15 @@ export function serialize(item: {
   return sections.join('\n\n');
 }
 
+const COLLAPSE_WS_RE = /(?:[\t\n\r\f\v\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]| {2,})\s*/g;
+const MULTI_SPACE_RE = / {2,}/g;
+
+function collapseWhitespace(text: string): string {
+  let out = text.replace(COLLAPSE_WS_RE, ' ');
+  if (out.includes('  ')) out = out.replace(MULTI_SPACE_RE, ' ');
+  return out.trim();
+}
+
 /**
  * Strips markdown markup to create a clean plaintext preview snippet.
  * Truncates to maxChars (default 150) and appends ellipsis if truncated.
@@ -253,40 +262,50 @@ export function serialize(item: {
 export function stripMarkdown(markdown?: string, maxChars = 150): string {
   if (!markdown) return '';
 
-  const text = markdown
-    // Remove code blocks
-    .replace(/```[\s\S]*?```/g, '')
-    // Remove inline code
-    .replace(/`([^`]+)`/g, '$1')
-    // Remove images: ![alt](url)
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '')
-    // Replace links with label text: [text](url) -> text
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-    // Remove headings: # Heading
-    .replace(/^#{1,6}\s+/gm, '')
-    // Remove blockquotes: > quote
-    .replace(/^>\s+/gm, '')
-    // Remove horizontal rules
-    .replace(/^[-*_]{3,}\s*$/gm, '')
-    // Remove unordered list markers: - item, * item
-    .replace(/^[\*\-+]\s+/gm, '')
-    // Remove ordered list markers: 1. item
-    .replace(/^\d+\.\s+/gm, '')
-    // Remove bold and italic formatting
-    .replace(/(\*\*|__)(.*?)\1/g, '$2')
-    .replace(/(\*|_)(.*?)\1/g, '$2')
-    // Remove strikethrough
-    .replace(/~~(.*?)~~/g, '$1')
-    // Remove table separator rows (| --- | :---: |) and the remaining cell pipes
-    .replace(/^\s*\|?(\s*:?-{3,}:?\s*\|)+\s*:?-*:?\s*$/gm, '')
-    .replace(/\s*\|\s*/g, ' ')
-    // Remove HTML tags
-    .replace(/<[^>]+>/g, '')
-    // Collapse consecutive whitespaces and newlines into single spaces
-    .replace(/\s+/g, ' ')
-    .trim();
+  let text = markdown;
+  // Remove code blocks and inline code
+  if (text.includes('`')) {
+    if (text.includes('```')) text = text.replace(/```[\s\S]*?```/g, '');
+    text = text.replace(/`([^`]+)`/g, '$1');
+  }
+  // Remove images and replace links with label text
+  if (text.includes('[')) {
+    if (text.includes('![')) text = text.replace(/!\[([^\]]*)\]\([^)]*\)/g, '');
+    text = text.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1');
+  }
+  // Remove headings: # Heading
+  if (text.includes('#')) text = text.replace(/^#{1,6}\s+/gm, '');
+  // Remove blockquotes: > quote
+  if (text.includes('>')) text = text.replace(/^>\s+/gm, '');
+  // Remove horizontal rules, list markers, bold and italic formatting
+  const hasStarOrUnderscore = text.includes('*') || text.includes('_');
+  const hasDash = text.includes('-');
+  if (hasDash || hasStarOrUnderscore) {
+    text = text.replace(/^[-*_]{3,}\s*$/gm, '');
+  }
+  if (hasDash || text.includes('*') || text.includes('+')) {
+    text = text.replace(/^[\*\-+]\s+/gm, '');
+  }
+  if (text.includes('.')) {
+    text = text.replace(/^\d+\.\s+/gm, '');
+  }
+  if (hasStarOrUnderscore) {
+    text = text
+      .replace(/(\*\*|__)(.*?)\1/g, '$2')
+      .replace(/(\*|_)(.*?)\1/g, '$2');
+  }
+  // Remove strikethrough
+  if (text.includes('~~')) text = text.replace(/~~(.*?)~~/g, '$1');
+  // Remove table separator rows (| --- | :---: |) and the remaining cell pipes
+  if (text.includes('|')) {
+    text = text
+      .replace(/^\s*\|?(\s*:?-{3,}:?\s*\|)+\s*:?-*:?\s*$/gm, '')
+      .replace(/\s*\|\s*/g, ' ');
+  }
+  // Remove HTML tags
+  if (text.includes('<')) text = text.replace(/<[^>]+>/g, '');
 
-  return truncatePreview(text, maxChars);
+  return truncatePreview(collapseWhitespace(text), maxChars);
 }
 
 /** Joplin's `markup_language` value for HTML notes (Markdown is 1) */
@@ -303,6 +322,7 @@ export function markupLanguageOf(properties: Record<string, string> | undefined)
 }
 
 const HTML_ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+const STRIP_HTML_CONTAINER_RE = /<(?:script|style|head|title|noscript)\b/i;
 
 /**
  * Strips HTML (e.g. a note saved with the Web Clipper) to a plaintext preview snippet: drops tags,
@@ -314,22 +334,29 @@ const HTML_ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot
  */
 export function stripHtml(html?: string, maxChars = 150): string {
   if (!html) return '';
-  const text = html
-    .replace(/<!--[\s\S]*?(?:-->|$)/g, ' ')
-    .replace(/<(script|style|head|title|noscript)\b[\s\S]*?(?:<\/\1\s*>|$)/gi, ' ')
+  let text = html;
+  if (text.includes('<')) {
+    if (text.includes('<!--')) {
+      text = text.replace(/<!--[\s\S]*?(?:-->|$)/g, ' ');
+    }
+    if (STRIP_HTML_CONTAINER_RE.test(text)) {
+      text = text.replace(/<(script|style|head|title|noscript)\b[\s\S]*?(?:<\/\1\s*>|$)/gi, ' ');
+    }
     // Block-level tags separate words, inline ones (<b>, <a>, <span>…) don't
-    .replace(/<\/?(?:address|article|aside|blockquote|br|dd|div|dl|dt|figcaption|figure|footer|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|td|th|tr|ul)\b[^>]*>?/gi, ' ')
-    .replace(/<\/?[a-zA-Z][^>]*>?/g, '')
-    .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (entity, name: string) => {
+    text = text
+      .replace(/<\/?(?:address|article|aside|blockquote|br|dd|div|dl|dt|figcaption|figure|footer|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|td|th|tr|ul)\b[^>]*>?/gi, ' ')
+      .replace(/<\/?[a-zA-Z][^>]*>?/g, '');
+  }
+  if (text.includes('&')) {
+    text = text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (entity, name: string) => {
       if (name[0] === '#') {
         const code = name[1] === 'x' || name[1] === 'X' ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
         return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : entity;
       }
       return HTML_ENTITIES[name.toLowerCase()] ?? entity;
-    })
-    .replace(/\s+/g, ' ')
-    .trim();
-  return truncatePreview(text, maxChars);
+    });
+  }
+  return truncatePreview(collapseWhitespace(text), maxChars);
 }
 
 /**

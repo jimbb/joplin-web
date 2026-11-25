@@ -1954,9 +1954,20 @@ export class NoteCacheService {
     const entry = await this.ensureFresh(sessionId);
     const deletedNotebookIds = this.deletedNotebookIdsOf(entry);
     const tagIdsByNote = this.tagIdsByNoteOf(entry);
+    const emptyResources: ResourceMetadata[] = [];
 
-    const taggedNoteIds = new Set<string>();
-    for (const link of entry.noteTags) taggedNoteIds.add(link.noteId);
+    const trimmedLengthOf = (str: string | undefined): number => {
+      if (!str) return 0;
+      let start = 0;
+      let end = str.length;
+      while (start < end && str.charCodeAt(start) <= 32) start++;
+      while (end > start && str.charCodeAt(end - 1) <= 32) end--;
+      if (start === end) return 0;
+      if (str.charCodeAt(start) >= 128 || str.charCodeAt(end - 1) >= 128) {
+        return str.slice(start, end).trim().length;
+      }
+      return end - start;
+    };
 
     const activeNotes: RawJoplinItem[] = [];
     for (const note of entry.notes.values()) {
@@ -1977,27 +1988,27 @@ export class NoteCacheService {
     };
 
     const linkedResourcesOf = (n: RawJoplinItem): ResourceMetadata[] => {
-      if (isEncrypted(n) || !n.body) return [];
+      if (isEncrypted(n) || !n.body || !n.body.includes(':/')) return emptyResources;
       const ids = extractLinkedResourceIds(n.body);
-      if (ids.length === 0) return [];
+      if (ids.length === 0) return emptyResources;
       const out: ResourceMetadata[] = [];
       for (const id of ids) {
         const res = entry.resources.get(id);
         if (res) out.push(res);
       }
-      return out;
+      return out.length > 0 ? out : emptyResources;
     };
 
     const hygieneItem = (n: RawJoplinItem, includeDetails = false): HygieneNoteItem => {
       const nb = n.parentId ? entry.notebooks.get(n.parentId) : null;
       const nbPath = pathForNotebook(n.parentId || '');
-      const preview = notePreview(n.body, markupLanguageOf(n.properties), 150);
+      const baseItem = this.toNoteListItem(entry, n, tagIdsByNote);
       const noteTagIds = tagIdsByNote.get(n.id) ?? [];
       const item: HygieneNoteItem = {
-        ...this.toNoteListItem(entry, n, tagIdsByNote),
+        ...baseItem,
         notebookTitle: nb ? notebookTitle(nb) : '',
         ...(nbPath ? { notebookPath: nbPath } : {}),
-        previewLength: n.body.trim().length || preview.length,
+        previewLength: trimmedLengthOf(n.body) || baseItem.preview.length,
         tagCount: noteTagIds.length,
       };
       if (includeDetails) {
@@ -2017,8 +2028,9 @@ export class NoteCacheService {
           let ocrLen = 0;
           for (const res of linked) {
             const name = res.filename || res.title || res.id;
-            const hasOcr = Boolean(res.ocrText && res.ocrText.trim());
-            if (hasOcr) ocrLen += res.ocrText.trim().length;
+            const resOcrLen = trimmedLengthOf(res.ocrText);
+            const hasOcr = resOcrLen > 0;
+            if (hasOcr) ocrLen += resOcrLen;
             attachments.push({
               id: res.id,
               name,
@@ -2037,14 +2049,14 @@ export class NoteCacheService {
 
     // 1. Empty notes (no body text & unencrypted)
     const emptyNotes = activeNotes
-      .filter((n) => !isEncrypted(n) && !n.body.trim())
+      .filter((n) => !isEncrypted(n) && trimmedLengthOf(n.body) === 0)
       .sort((a, b) => b.updatedTime - a.updatedTime)
       .slice(0, 200)
       .map((n) => hygieneItem(n));
 
     // 2. Untagged notes
     const untaggedNotes = activeNotes
-      .filter((n) => !taggedNoteIds.has(n.id))
+      .filter((n) => !tagIdsByNote.has(n.id))
       .sort((a, b) => b.updatedTime - a.updatedTime)
       .slice(0, 300)
       .map((n) => hygieneItem(n));
