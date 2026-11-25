@@ -3,7 +3,7 @@ import { NoteListItem as NoteListItemType, Notebook, Tag } from "@/lib/types";
 import { NoteListItem } from "./NoteListItem";
 import { getResourceUrl } from "@/lib/api";
 import { formatRelativeTime, noteDisplayTitle } from "@/lib/format";
-import { NOTE_LIST_VIEW_STORAGE_KEY } from "@/lib/ui-constants";
+import { NOTE_LIST_PAGE_SIZE, NOTE_LIST_VIEW_STORAGE_KEY } from "@/lib/ui-constants";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -50,7 +50,7 @@ import { useSearch } from "@/hooks/use-search";
 import { useTags } from "@/hooks/use-tags";
 import { TitleDetailControl, useTitleDetail } from "@/components/organize/TitleDetailControl";
 
-export const NOTE_LIST_PAGE_SIZE = 100;
+export { NOTE_LIST_PAGE_SIZE } from "@/lib/ui-constants";
 
 interface NoteListProps {
   notes?: NoteListItemType[];

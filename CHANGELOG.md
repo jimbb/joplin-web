@@ -4,6 +4,10 @@ Notable changes to Joplin Web. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Changed
+
+- Faster full-text search: the backend matches raw titles, bodies and attachment OCR with per-query compiled case-insensitive Unicode regexes, cuts OCR snippets without normalizing whole attachments, and memoizes per-note resource links and list previews in memory. The client renders search results progressively (100 cards at a time) and cancels superseded search requests via `AbortSignal`.
+
 ## [1.1.1] – 2026-10-19
 
 ### Changed

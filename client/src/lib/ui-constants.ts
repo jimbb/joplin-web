@@ -5,6 +5,9 @@ export const MOBILE_SEARCH_INPUT_ID = "mobile-sidebar-search";
 export const SEARCH_SYNTAX_HINT =
   'Searches titles, bodies, and attachment OCR. Use "exact phrase", -word to exclude, tag:name, notebook:name, tag:none, type:todo, iscompleted:0, has:attachment, has:ocr, sourceurl:domain, created:week, updated:today.';
 
+/** Number of items rendered per page in progressive lists (NoteList, SearchResults) */
+export const NOTE_LIST_PAGE_SIZE = 100;
+
 /** localStorage key holding the NoteList view layout ("list" | "gallery" | "table" | "board") */
 export const NOTE_LIST_VIEW_STORAGE_KEY = "joplin-note-list-view";
 

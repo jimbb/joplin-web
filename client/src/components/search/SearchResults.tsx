@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { SearchResult } from "@/lib/types";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -7,8 +7,10 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/format";
 import { QueryError } from "@/components/common/QueryError";
-import { SEARCH_SYNTAX_HINT } from "@/lib/ui-constants";
+import { NOTE_LIST_PAGE_SIZE, SEARCH_SYNTAX_HINT } from "@/lib/ui-constants";
 import { PromptDialog } from "@/components/common/Dialogs";
+
+export { NOTE_LIST_PAGE_SIZE } from "@/lib/ui-constants";
 
 interface SearchResultsProps {
   query: string;
@@ -82,6 +84,25 @@ export function SearchResults({
   isSavingSearch = false,
 }: SearchResultsProps) {
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
+  const [renderLimit, setRenderLimit] = useState(NOTE_LIST_PAGE_SIZE);
+
+  // Reset the progressive slice when the query or result list changes (synchronously during render)
+  const [prevQuery, setPrevQuery] = useState(query);
+  const [prevResults, setPrevResults] = useState(results);
+  if (query !== prevQuery || (results !== prevResults && (results.length > 0 || prevResults.length > 0))) {
+    setPrevQuery(query);
+    setPrevResults(results);
+    if (renderLimit !== NOTE_LIST_PAGE_SIZE) {
+      setRenderLimit(NOTE_LIST_PAGE_SIZE);
+    }
+  }
+
+  const activeIndex = selectedNoteId ? results.findIndex((n) => n.id === selectedNoteId) : -1;
+  const visibleCount = Math.min(
+    results.length,
+    Math.max(renderLimit, activeIndex >= 0 ? activeIndex + 1 : 0)
+  );
+  const visibleResults = useMemo(() => results.slice(0, visibleCount), [results, visibleCount]);
 
   return (
     <div className="flex flex-col h-full bg-background border-r border-border">
@@ -128,7 +149,15 @@ export function SearchResults({
       </div>
 
       {/* Results content */}
-      <ScrollArea className="flex-1 p-3">
+      <ScrollArea
+        className="flex-1 min-h-0 p-3 [&>[data-radix-scroll-area-viewport]>div]:block!"
+        onScrollCapture={(e) => {
+          const el = e.target as HTMLElement;
+          if (visibleCount < results.length && el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
+            setRenderLimit((prev) => Math.max(prev, visibleCount) + NOTE_LIST_PAGE_SIZE);
+          }
+        }}
+      >
         {isLoading ? (
           <div className="space-y-3">
             {Array.from({ length: 5 }).map((_, i) => (
@@ -159,7 +188,7 @@ export function SearchResults({
           </div>
         ) : (
           <div className="space-y-2 pb-6">
-            {results.map((note) => {
+            {visibleResults.map((note) => {
               const isActive = selectedNoteId === note.id;
               const relativeTime = formatRelativeTime(note.updatedTime || note.createdTime);
 
@@ -226,6 +255,20 @@ export function SearchResults({
                 </div>
               );
             })}
+
+            {visibleCount < results.length && (
+              <div className="pt-2 text-center">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 text-xs text-muted-foreground hover:text-foreground"
+                  onClick={() => setRenderLimit((prev) => Math.max(prev, visibleCount) + NOTE_LIST_PAGE_SIZE)}
+                >
+                  Show more ({results.length - visibleCount} remaining)
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </ScrollArea>
