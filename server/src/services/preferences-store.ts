@@ -14,6 +14,7 @@ import { assertValidId, WriteValidationError } from './note-writer.js';
 
 const OWNER_KEY_RE = /^[A-Za-z0-9_-]+$/;
 const ID_RE = /^[0-9a-f]{32}$/;
+const PAIR_KEY_RE = /^([0-9a-f]{32}):([0-9a-f]{32})$/;
 const TASK_KEY_RE = /^(?:todo-[0-9a-f]{32}|inline-[0-9a-f]{32}-[1-9]\d{0,6}-\d{1,7})$/;
 const VALID_COLORS = new Set<TaskCategoryColor>([
   'slate',
@@ -33,6 +34,16 @@ export const MAX_SCRATCHPAD_CHARS = 100_000;
 export const MAX_TASK_CATEGORIES = 50;
 export const MAX_TASK_CATEGORY_RULES = 30;
 export const MAX_TASK_CATEGORY_ASSIGNMENTS = 2000;
+export const MAX_DISMISSED_DUPLICATE_PAIRS = 5000;
+
+function canonicalPair(idA: string, idB: string): string {
+  const a = assertValidId(idA, 'note id');
+  const b = assertValidId(idB, 'note id');
+  if (a === b) {
+    throw new WriteValidationError('Duplicate pair must contain two distinct note ids', 400);
+  }
+  return a < b ? `${a}:${b}` : `${b}:${a}`;
+}
 
 function sanitizeColor(value: unknown): TaskCategoryColor {
   return typeof value === 'string' && VALID_COLORS.has(value as TaskCategoryColor)
@@ -111,6 +122,7 @@ function emptyPreferences(): UserPreferences {
     scratchpad: '',
     taskCategories: [],
     taskCategoryAssignments: {},
+    dismissedDuplicatePairs: [],
   };
 }
 
@@ -219,6 +231,21 @@ function sanitizePreferences(raw: unknown): UserPreferences {
     }
   }
 
+  const dismissedDuplicatePairs: string[] = [];
+  if (Array.isArray(obj.dismissedDuplicatePairs)) {
+    const seenPairs = new Set<string>();
+    for (const item of obj.dismissedDuplicatePairs) {
+      if (typeof item !== 'string') continue;
+      const m = PAIR_KEY_RE.exec(item);
+      if (!m || m[1] === m[2]) continue;
+      const key = m[1] < m[2] ? `${m[1]}:${m[2]}` : `${m[2]}:${m[1]}`;
+      if (seenPairs.has(key)) continue;
+      seenPairs.add(key);
+      dismissedDuplicatePairs.push(key);
+      if (dismissedDuplicatePairs.length >= MAX_DISMISSED_DUPLICATE_PAIRS) break;
+    }
+  }
+
   return {
     version: 1,
     favoriteNoteIds,
@@ -228,6 +255,7 @@ function sanitizePreferences(raw: unknown): UserPreferences {
     scratchpad,
     taskCategories,
     taskCategoryAssignments,
+    dismissedDuplicatePairs,
   };
 }
 
@@ -311,6 +339,7 @@ export class PreferencesStore {
       scratchpad: prefs.scratchpad,
       taskCategories: prefs.taskCategories.map(cloneTaskCategory),
       taskCategoryAssignments: { ...prefs.taskCategoryAssignments },
+      dismissedDuplicatePairs: [...prefs.dismissedDuplicatePairs],
     };
   }
 
@@ -558,6 +587,58 @@ export class PreferencesStore {
       prefs.taskCategoryAssignments = next;
       this.save(ownerKey, prefs);
       return { ...next };
+    });
+  }
+
+  /** Persists one or more note-id pairs as "Not duplicates" so they do not reappear in hygiene reports. */
+  public dismissDuplicatePairs(
+    ownerKey: string,
+    pairs: Array<[string, string]>
+  ): Promise<string[]> {
+    if (!Array.isArray(pairs) || pairs.length === 0) {
+      throw new WriteValidationError('At least one note pair is required', 400);
+    }
+    const normalized = Array.from(new Set(pairs.map(([a, b]) => canonicalPair(a, b))));
+    return this.withOwnerLock(ownerKey, () => {
+      const prefs = this.load(ownerKey);
+      const existing = new Set(prefs.dismissedDuplicatePairs);
+      let changed = false;
+      for (const key of normalized) {
+        if (existing.has(key)) continue;
+        if (existing.size >= MAX_DISMISSED_DUPLICATE_PAIRS) {
+          throw new WriteValidationError(
+            `Maximum ${MAX_DISMISSED_DUPLICATE_PAIRS} dismissed duplicate pairs allowed`,
+            400
+          );
+        }
+        existing.add(key);
+        changed = true;
+      }
+      if (changed) {
+        prefs.dismissedDuplicatePairs = Array.from(existing);
+        this.save(ownerKey, prefs);
+      }
+      return [...prefs.dismissedDuplicatePairs];
+    });
+  }
+
+  /** Removes previously dismissed duplicate note-id pairs (used by Undo). */
+  public undismissDuplicatePairs(
+    ownerKey: string,
+    pairs: Array<[string, string]>
+  ): Promise<string[]> {
+    if (!Array.isArray(pairs) || pairs.length === 0) {
+      throw new WriteValidationError('At least one note pair is required', 400);
+    }
+    const toRemove = new Set(pairs.map(([a, b]) => canonicalPair(a, b)));
+    return this.withOwnerLock(ownerKey, () => {
+      const prefs = this.load(ownerKey);
+      const next = prefs.dismissedDuplicatePairs.filter((k) => !toRemove.has(k));
+      if (next.length !== prefs.dismissedDuplicatePairs.length) {
+        prefs.dismissedDuplicatePairs = next;
+        this.save(ownerKey, prefs);
+      }
+      return [...prefs.dismissedDuplicatePairs];
     });
   }
 }
