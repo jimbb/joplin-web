@@ -6,6 +6,7 @@ Notable changes to Joplin Web. The format follows [Keep a Changelog](https://kee
 
 ### Changed
 
+- The notebook lists in *New AI job* and the Auto-organize confirmation (source scope and excluded target notebooks) start collapsed to the top-level notebooks; each parent expands or collapses with its chevron, and *Expand all* / *Collapse all* toggles the whole tree. A preselected nested notebook opens its path, filtering still lists matches flat.
 - Faster full-text search: the backend matches raw titles, bodies and attachment OCR with per-query compiled case-insensitive Unicode regexes, cuts OCR snippets without normalizing whole attachments, and memoizes per-note resource links and list previews in memory. The client renders search results progressively (100 cards at a time) and cancels superseded search requests via `AbortSignal`.
 
 ### Fixed

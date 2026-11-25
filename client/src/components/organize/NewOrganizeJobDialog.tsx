@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
-import { Folder, Loader2, Sparkles } from "lucide-react";
+import { Loader2, Sparkles } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { flattenNotebooks } from "@/lib/notebooks";
+import { NotebookCheckTree } from "@/components/notebooks/NotebookCheckTree";
 import { Notebook, OrganizeJobMode, TitleDetail } from "@/lib/types";
 import { TitleDetailControl, useTitleDetail } from "./TitleDetailControl";
 
@@ -20,6 +20,8 @@ interface NewOrganizeJobDialogProps {
   }) => void | Promise<void>;
 }
 
+const NONE: ReadonlySet<string> = new Set();
+
 /** Picks a source scope, AI mode, and title detail level before the disclosure/exclusion confirmation. */
 export function NewOrganizeJobDialog({ open, onOpenChange, notebooks, isPending = false, matched, onConfirm }: NewOrganizeJobDialogProps) {
   const [sourceIds, setSourceIds] = useState<Set<string>>(new Set());
@@ -27,7 +29,6 @@ export function NewOrganizeJobDialog({ open, onOpenChange, notebooks, isPending 
   const [includeSubNotebooks, setIncludeSubNotebooks] = useState(true);
   const [mode, setMode] = useState<OrganizeJobMode>("organize");
   const [titleDetail, setTitleDetail] = useTitleDetail();
-  const flat = useMemo(() => flattenNotebooks(notebooks).filter((nb) => !nb.encrypted), [notebooks]);
   const noteCounts = useMemo(() => {
     const counts = new Map<string, number>();
     const walk = (nodes: Notebook[]) => nodes.forEach((node) => {
@@ -53,15 +54,13 @@ export function NewOrganizeJobDialog({ open, onOpenChange, notebooks, isPending 
             <button type="button" className="flex w-full items-center gap-2 rounded-md border border-border px-3 py-2 text-left text-sm" onClick={selectAll}>
               <input type="radio" checked={allNotes} onChange={selectAll} /> All notes
             </button>
-            <div className="max-h-48 space-y-0.5 overflow-y-auto rounded-md border border-border p-1">
-              {flat.map((nb) => {
-                const checked = !allNotes && sourceIds.has(nb.id);
-                return <label key={nb.id} style={{ paddingLeft: `${8 + nb.depth * 14}px` }} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted/50">
-                  <input type="checkbox" checked={checked} onChange={() => { setAllNotes(false); toggle(nb.id); }} />
-                  <Folder className="h-3.5 w-3.5 text-muted-foreground" /><span className="truncate">{nb.title || "Untitled Folder"}</span><span className="ml-auto text-xs text-muted-foreground">{noteCounts.get(nb.id) ?? 0}</span>
-                </label>;
-              })}
-            </div>
+            <NotebookCheckTree
+              notebooks={notebooks}
+              checkedIds={allNotes ? NONE : sourceIds}
+              onToggle={(id) => { setAllNotes(false); toggle(id); }}
+              meta={(nb) => noteCounts.get(nb.id) ?? 0}
+              aria-label="Source notebooks"
+            />
             {!allNotes && <label className="flex items-center gap-2 text-xs text-muted-foreground"><input type="checkbox" checked={includeSubNotebooks} onChange={(event) => setIncludeSubNotebooks(event.target.checked)} /> Include sub-notebooks</label>}
           </div>
           {matched !== undefined && <p className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-sm text-foreground"><strong>{matched.toLocaleString()}</strong> notes matched this scope.</p>}

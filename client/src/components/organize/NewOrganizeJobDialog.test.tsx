@@ -5,7 +5,16 @@ import { TITLE_DETAIL_STORAGE_KEY } from "@/lib/ui-constants";
 import { NewOrganizeJobDialog } from "./NewOrganizeJobDialog";
 
 const id = (value: string) => value.repeat(32);
-const notebooks: Notebook[] = [{ id: id("1"), title: "Pending", parentId: "", children: [], noteCount: 4 }];
+const notebooks: Notebook[] = [
+  { id: id("1"), title: "Pending", parentId: "", children: [], noteCount: 4 },
+  {
+    id: id("2"),
+    title: "Personal",
+    parentId: "",
+    noteCount: 1,
+    children: [{ id: id("3"), title: "Bank", parentId: id("2"), children: [], noteCount: 5 }],
+  },
+];
 
 beforeEach(() => {
   localStorage.clear();
@@ -50,5 +59,23 @@ describe("NewOrganizeJobDialog", () => {
     unmount();
     render(<NewOrganizeJobDialog open onOpenChange={vi.fn()} notebooks={notebooks} matched={2} onConfirm={onConfirm} />);
     expect(screen.getByRole("button", { name: "Detailed" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("shows notebooks collapsed, with sub-notebook totals, and picks a nested notebook after expanding", () => {
+    const onConfirm = vi.fn();
+    render(<NewOrganizeJobDialog open onOpenChange={vi.fn()} notebooks={notebooks} matched={5} onConfirm={onConfirm} />);
+    expect(screen.queryByRole("checkbox", { name: /Bank/ })).toBeNull();
+    expect(screen.getByRole("checkbox", { name: /Personal/ }).closest("label")?.textContent).toContain("6");
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand Personal" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Bank/ }));
+    expect((screen.getAllByRole("radio")[0] as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(onConfirm).toHaveBeenCalledWith({
+      sourceNotebookIds: [id("3")],
+      mode: "organize",
+      includeSubNotebooks: true,
+      titleDetail: "standard",
+    });
   });
 });

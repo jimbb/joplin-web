@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { AlertTriangle, Folder, History, Info, Loader2, Search, Sparkles } from "lucide-react";
+import { AlertTriangle, History, Info, Loader2, Search, Sparkles } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -11,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { flattenNotebooks } from "@/lib/notebooks";
+import { NotebookCheckTree } from "@/components/notebooks/NotebookCheckTree";
 import { Notebook, OrganizeJobSummary, TitleDetail } from "@/lib/types";
 import type { OrganizeJobMode } from "@/lib/types";
 import { TitleDetailControl, useTitleDetail } from "./TitleDetailControl";
@@ -75,12 +76,6 @@ export function StartOrganizeDialog({
   const flatNotebooks = useMemo(
     () => flattenNotebooks(notebooks).filter((nb) => !nb.encrypted),
     [notebooks]
-  );
-
-  const query = filter.trim().toLowerCase();
-  const visibleNotebooks = useMemo(
-    () => (query ? flatNotebooks.filter((nb) => nb.title.toLowerCase().includes(query)) : flatNotebooks),
-    [flatNotebooks, query]
   );
 
   const toggleExcluded = (id: string) => {
@@ -159,7 +154,7 @@ export function StartOrganizeDialog({
 
           {mode === "organize" && <div className="space-y-2">
             <div className="flex items-center justify-between gap-2">
-              {mode === "organize" && <span className="text-xs font-medium text-foreground">Exclude target notebooks</span>}
+              <span className="text-xs font-medium text-foreground">Exclude target notebooks</span>
               <span className="text-[11px] text-muted-foreground font-mono">
                 {excludedIds.size} excluded
               </span>
@@ -178,40 +173,15 @@ export function StartOrganizeDialog({
               </div>
             )}
 
-            {mode === "organize" && <div
-              role="group"
+            <NotebookCheckTree
+              notebooks={notebooks}
+              checkedIds={excludedIds}
+              onToggle={toggleExcluded}
+              filter={filter}
+              disabled={isPending}
+              meta={(nb) => (defaultExcludedNotebookId === nb.id ? "Source" : null)}
               aria-label="Notebooks to exclude as destinations"
-              className="max-h-48 overflow-y-auto rounded-lg border border-border bg-muted/20 p-1.5 space-y-0.5"
-            >
-              {visibleNotebooks.map((nb) => {
-                const checked = excludedIds.has(nb.id);
-                return (
-                  <label
-                    key={nb.id}
-                    style={{ paddingLeft: `${8 + (query ? 0 : nb.depth * 14)}px` }}
-                    className="flex items-center gap-2 rounded-md py-1.5 pr-2 text-sm text-foreground hover:bg-muted/60 cursor-pointer select-none"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      disabled={isPending}
-                      onChange={() => toggleExcluded(nb.id)}
-                      className="h-4 w-4 rounded border-input accent-primary shrink-0 cursor-pointer"
-                    />
-                    <Folder className="h-3.5 w-3.5 text-muted-foreground shrink-0" aria-hidden="true" />
-                    <span className="truncate">{nb.title || "Untitled Folder"}</span>
-                    {defaultExcludedNotebookId === nb.id && (
-                      <span className="ml-auto shrink-0 text-[11px] text-muted-foreground">Source</span>
-                    )}
-                  </label>
-                );
-              })}
-              {visibleNotebooks.length === 0 && (
-                <p className="px-2 py-3 text-center text-xs text-muted-foreground">
-                  No matching notebooks
-                </p>
-              )}
-            </div>}
+            />
           </div>}
 
           <TitleDetailControl value={titleDetail} onChange={setTitleDetail} disabled={isPending} />

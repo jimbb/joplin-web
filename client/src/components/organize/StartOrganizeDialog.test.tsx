@@ -72,6 +72,26 @@ describe("StartOrganizeDialog", () => {
     expect(onConfirm).toHaveBeenCalledWith([id("1"), id("3")], "standard");
   });
 
+  it("keeps notebooks collapsed but opens the path to a nested source notebook", () => {
+    renderWithProviders(
+      <StartOrganizeDialog
+        open
+        onOpenChange={vi.fn()}
+        selectedCount={2}
+        notebooks={notebooks}
+        defaultExcludedNotebookId={id("4")}
+        onConfirm={vi.fn()}
+      />
+    );
+
+    expect((screen.getByRole("checkbox", { name: /Bills/ }) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Collapse Personal" }));
+    expect(screen.queryByRole("checkbox", { name: /Bills/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Expand all" }));
+    expect(screen.getByRole("checkbox", { name: /Bank/ })).toBeTruthy();
+    expect(screen.getByText("1 excluded")).toBeTruthy();
+  });
+
   it("shows Previous jobs (N) and running-job warning with Cancel and start option", () => {
     const onViewJobs = vi.fn();
     const onViewRunningJob = vi.fn();
