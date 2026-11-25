@@ -36,6 +36,7 @@ import { toast } from "sonner";
 import { uploadResource } from "@/lib/api";
 import { announceWrite } from "@/lib/cross-tab";
 import { joplinToRichHtml, joplinToRichMarkdown, richHtmlToJoplin, richMarkdownToJoplin } from "@/lib/note-stats";
+import { resourceLink } from "@/lib/markdown-format";
 import { cn } from "@/lib/utils";
 import { PromptDialog } from "@/components/common/Dialogs";
 import { NoteLinkPicker } from "./NoteLinkPicker";
@@ -47,6 +48,8 @@ interface RichEditorProps {
   html?: boolean;
   className?: string;
   onUploadsChange?: (pending: number) => void;
+  /** Called with the Joplin link of an upload that ended after the editor had closed (another layout was picked) */
+  onDetachedUpload?: (link: string) => void;
   noteId?: string;
 }
 
@@ -62,7 +65,7 @@ const toolButtonClass = (active = false) =>
   );
 
 export const RichEditor = forwardRef<RichEditorHandle, RichEditorProps>(function RichEditor(
-  { value, onChange, autoFocus = false, html = false, className, onUploadsChange, noteId },
+  { value, onChange, autoFocus = false, html = false, className, onUploadsChange, onDetachedUpload, noteId },
   ref
 ) {
   const [notePickerOpen, setNotePickerOpen] = useState(false);
@@ -71,6 +74,8 @@ export const RichEditor = forwardRef<RichEditorHandle, RichEditorProps>(function
 
   const onChangeRef = useRef(onChange);
   const onUploadsChangeRef = useRef(onUploadsChange);
+  const onDetachedUploadRef = useRef(onDetachedUpload);
+  const htmlRef = useRef(html);
   const editorInstanceRef = useRef<Editor | null>(null);
   const pendingRef = useRef(0);
   const lastEmittedRef = useRef(value);
@@ -81,7 +86,9 @@ export const RichEditor = forwardRef<RichEditorHandle, RichEditorProps>(function
 
   useEffect(() => {
     onUploadsChangeRef.current = onUploadsChange;
-  }, [onUploadsChange]);
+    onDetachedUploadRef.current = onDetachedUpload;
+    htmlRef.current = html;
+  }, [onUploadsChange, onDetachedUpload, html]);
 
   const uploadAndInsertFiles = useCallback(async (files: File[]) => {
     const activeEditor = editorInstanceRef.current;
@@ -94,8 +101,12 @@ export const RichEditor = forwardRef<RichEditorHandle, RichEditorProps>(function
         const resource = await uploadResource(file);
         announceWrite();
         const ed = editorInstanceRef.current;
-        if (!ed || ed.isDestroyed) continue;
-        if (file.type.startsWith("image/")) {
+        const isImage = file.type.startsWith("image/");
+        if (!ed || ed.isDestroyed) {
+          onDetachedUploadRef.current?.(resourceLink(resource, isImage, htmlRef.current));
+          continue;
+        }
+        if (isImage) {
           ed.chain()
             .focus()
             .setImage({ src: `/api/resources/${resource.id}`, alt: resource.title || file.name })

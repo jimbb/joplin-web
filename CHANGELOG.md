@@ -8,6 +8,11 @@ Notable changes to Joplin Web. The format follows [Keep a Changelog](https://kee
 
 - Faster full-text search: the backend matches raw titles, bodies and attachment OCR with per-query compiled case-insensitive Unicode regexes, cuts OCR snippets without normalizing whole attachments, and memoizes per-note resource links and list previews in memory. The client renders search results progressively (100 cards at a time) and cancels superseded search requests via `AbortSignal`.
 
+### Fixed
+
+- Switching the editor layout (for example from Split to Rich) while a file is still uploading no longer leaves an `Uploading …` placeholder in the note: the attachment link replaces it once the upload finishes, or goes at the end of the text if the upload started in Rich.
+- If the Rich editor can't be loaded (offline, or a tab opened before a new deployment), only the Rich pane shows an error with *Retry* and *Switch to Edit*; the rest of the editor, its text and running uploads stay as they are.
+
 ## [1.1.1] – 2026-10-19
 
 ### Changed

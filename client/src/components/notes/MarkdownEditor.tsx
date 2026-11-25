@@ -33,6 +33,7 @@ import { useSearch } from "@/hooks/use-search";
 import { FormattingToolbar } from "./FormattingToolbar";
 import { NoteLinkPicker } from "./NoteLinkPicker";
 import { formattingKeymap, insertNoteLinkCommand, runFormatCommand } from "./editor-commands";
+import { escapePlaceholderLabel, resourceLink } from "@/lib/markdown-format";
 
 interface MarkdownEditorProps {
   value: string;
@@ -41,6 +42,11 @@ interface MarkdownEditorProps {
   className?: string;
   /** Called with the number of uploads in progress whenever it changes */
   onUploadsChange?: (pending: number) => void;
+  /**
+   * Called when an upload ends after the editor has closed (e.g. another layout was picked):
+   * the owner of the text swaps `placeholder` for `link` (empty when the upload failed)
+   */
+  onDetachedUpload?: (link: string, placeholder: string) => void;
   /** The text is HTML (an HTML note): uploaded files are inserted as `<img>` / `<a>` instead of Markdown */
   html?: boolean;
   /** The note being edited; the "Link to note" picker leaves it out */
@@ -59,25 +65,6 @@ export const UPLOAD_PLACEHOLDER = /!?\[Uploading [^\]\n]*\]\(uploading-[a-z0-9]+
 
 function escapeLinkText(text: string) {
   return text.replace(/[[\]]/g, (c) => (c === "[" ? "\\[" : "\\]"));
-}
-
-function escapePlaceholderLabel(text: string) {
-  return text.replace(/[[\]]/g, (c) => (c === "[" ? "(" : ")"));
-}
-
-const HTML_ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
-
-function escapeHtml(text: string) {
-  return text.replace(/[&<>"]/g, (c) => HTML_ESCAPES[c]);
-}
-
-/** Link to an uploaded resource in the note's markup (Markdown, or HTML for HTML notes) */
-function resourceLink(resource: { id: string; title: string }, isImage: boolean, html: boolean) {
-  if (html) {
-    const title = escapeHtml(resource.title);
-    return isImage ? `<img src=":/${resource.id}" alt="${title}">` : `<a href=":/${resource.id}">${title}</a>`;
-  }
-  return `${isImage ? "!" : ""}[${escapePlaceholderLabel(resource.title)}](:/${resource.id})`;
 }
 
 interface SlashCommandDef {
@@ -208,7 +195,7 @@ const markdownHighlight = HighlightStyle.define([
  * Files dropped or pasted into it are uploaded as Joplin resources and linked at that position.
  */
 export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorProps>(function MarkdownEditor(
-  { value, onChange, autoFocus, className, onUploadsChange, html = false, noteId },
+  { value, onChange, autoFocus, className, onUploadsChange, onDetachedUpload, html = false, noteId },
   ref
 ) {
   const viewRef = useRef<EditorView | null>(null);
@@ -219,11 +206,13 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
 
   const pendingRef = useRef(0);
   const onUploadsChangeRef = useRef(onUploadsChange);
+  const onDetachedUploadRef = useRef(onDetachedUpload);
   const htmlRef = useRef(html);
 
   useEffect(() => {
     onUploadsChangeRef.current = onUploadsChange;
-  }, [onUploadsChange]);
+    onDetachedUploadRef.current = onDetachedUpload;
+  }, [onUploadsChange, onDetachedUpload]);
 
   useEffect(() => {
     htmlRef.current = html;
@@ -341,7 +330,11 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
     /** Swaps a placeholder for its final text, wherever edits have moved it */
     const replaceToken = (token: string, text: string) => {
       const activeView = viewRef.current;
-      if (!activeView) return;
+      // A closed editor's view is detached from the page; the placeholder now lives in the note text only
+      if (!activeView?.dom.isConnected) {
+        onDetachedUploadRef.current?.(text, token);
+        return;
+      }
       const from = activeView.state.doc.toString().indexOf(token);
       if (from < 0) return;
       activeView.dispatch({ changes: { from, to: from + token.length, insert: text } });

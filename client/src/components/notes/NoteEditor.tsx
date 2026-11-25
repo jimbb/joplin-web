@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useRef, useSt
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
+  AlertCircle,
   AlertTriangle,
   Check,
   ChevronDown,
@@ -23,6 +24,7 @@ import { invalidateLists } from "@/hooks/use-mutations";
 import { useNoteSaver } from "@/hooks/use-note-saver";
 import { setTaskChecked } from "@/lib/tasks";
 import { MarkdownEditor, MarkdownEditorHandle, UPLOAD_PLACEHOLDER } from "./MarkdownEditor";
+import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import type { RichEditorHandle } from "./RichEditor";
 import { VoiceNoteModal } from "./VoiceNoteModal";
 import { TagEditor } from "@/components/tags/TagEditor";
@@ -57,9 +59,11 @@ import { useOrganizeStatus } from "@/hooks/use-organize";
 const AUTOSAVE_DELAY_MS = 1500;
 const MODE_STORAGE_KEY = "joplin-editor-mode";
 
-const RichEditor = lazy(() => import("./RichEditor").then((m) => ({ default: m.RichEditor })));
+const lazyRichEditor = () => lazy(() => import("./RichEditor").then((m) => ({ default: m.RichEditor })));
+let RichEditor = lazyRichEditor();
 
 type EditorMode = "rich" | "edit" | "split" | "preview";
+type UploadSource = "markdown" | "rich";
 type SaveStatus = "saved" | "dirty" | "saving" | "error" | "conflict";
 
 interface Draft {
@@ -129,6 +133,7 @@ export function NoteEditor({ note, readOnly = false, focusTitle = false, initial
   const [remoteChange, setRemoteChange] = useState<Note | null>(null);
   const [editorKey, setEditorKey] = useState(0);
   const [uploadCount, setUploadCount] = useState(0);
+  const [richAttempt, setRichAttempt] = useState(0);
   const [voiceModalOpen, setVoiceModalOpen] = useState(false);
   const [titleSuggestion, setTitleSuggestion] = useState<string | null>(null);
   const [titleSuggestionLoading, setTitleSuggestionLoading] = useState(false);
@@ -137,6 +142,8 @@ export function NoteEditor({ note, readOnly = false, focusTitle = false, initial
   const richEditorRef = useRef<RichEditorHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const uploadsRef = useRef(0);
+  // Both editors can have uploads in flight at once (one started before a layout switch)
+  const uploadsBySourceRef = useRef<Record<UploadSource, number>>({ markdown: 0, rich: 0 });
 
   const draftRef = useRef(draft);
   const savedRef = useRef<Draft>({ title: note.title, body: note.body });
@@ -412,9 +419,35 @@ export function NoteEditor({ note, readOnly = false, focusTitle = false, initial
     }
   };
 
-  const handleUploadsChange = (pending: number) => {
-    uploadsRef.current = pending;
-    setUploadCount(pending);
+  const handleUploadsChange = (source: UploadSource, pending: number) => {
+    uploadsBySourceRef.current[source] = pending;
+    uploadsRef.current = uploadsBySourceRef.current.markdown + uploadsBySourceRef.current.rich;
+    setUploadCount(uploadsRef.current);
+  };
+
+  /**
+   * Links an upload that finished after its editor closed (another layout was picked meanwhile):
+   * in place of its placeholder if the text still has it, else at the end of the text.
+   */
+  const handleDetachedUpload = (link: string, placeholder?: string) => {
+    if (unmountedRef.current) return;
+    const body = draftRef.current.body;
+    if (placeholder) {
+      if (body.includes(placeholder)) updateDraft({ body: body.replace(placeholder, () => link) });
+    } else if (link) {
+      const text = body.trimEnd();
+      updateDraft({ body: text ? `${text}\n\n${link}` : link });
+    }
+  };
+
+  const retryRichEditor = () => {
+    // Failing again after a fresh import usually means the chunk is gone (new deployment): reload
+    if (richAttempt > 0) {
+      window.location.reload();
+      return;
+    }
+    RichEditor = lazyRichEditor();
+    setRichAttempt((n) => n + 1);
   };
 
   const handleDone = async () => {
@@ -761,25 +794,48 @@ export function NoteEditor({ note, readOnly = false, focusTitle = false, initial
         {isRichMode && (
           <div className="min-h-0 overflow-hidden px-4 sm:px-10 lg:px-12 pt-2">
             <div className="h-full max-w-4xl mx-auto">
-              <Suspense
-                fallback={
-                  <div className="flex items-center gap-2 py-8 text-xs text-muted-foreground">
-                    <Loader2 className="h-4 w-4 animate-spin" /> Loading rich editor...
+              {/* A failed chunk (offline, or this tab predates a deployment) only takes out Rich mode */}
+              <ErrorBoundary
+                key={richAttempt}
+                fallback={() => (
+                  <div role="alert" className="flex flex-col items-center justify-center gap-3 py-12 text-center">
+                    <AlertCircle className="h-6 w-6 text-destructive" aria-hidden="true" />
+                    <p className="text-sm font-medium text-foreground">Rich editor could not be loaded</p>
+                    <p className="max-w-xs text-xs text-muted-foreground">
+                      Your text is kept. Check your connection and try again, or keep writing in Edit.
+                    </p>
+                    <div className="flex gap-2">
+                      <Button size="sm" onClick={retryRichEditor}>
+                        Retry
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => changeMode("edit")}>
+                        Switch to Edit
+                      </Button>
+                    </div>
                   </div>
-                }
+                )}
               >
-                <RichEditor
-                  ref={richEditorRef}
-                  key={`rich-${isHtml ? "html" : "md"}-${editorKey}`}
-                  html={isHtml}
-                  onUploadsChange={handleUploadsChange}
-                  noteId={note.id}
-                  value={draft.body}
-                  onChange={(body) => updateDraft({ body })}
-                  autoFocus={!focusTitle}
-                  className="h-full"
-                />
-              </Suspense>
+                <Suspense
+                  fallback={
+                    <div className="flex items-center gap-2 py-8 text-xs text-muted-foreground">
+                      <Loader2 className="h-4 w-4 animate-spin" /> Loading rich editor...
+                    </div>
+                  }
+                >
+                  <RichEditor
+                    ref={richEditorRef}
+                    key={`rich-${isHtml ? "html" : "md"}-${editorKey}`}
+                    html={isHtml}
+                    onUploadsChange={(pending) => handleUploadsChange("rich", pending)}
+                    onDetachedUpload={handleDetachedUpload}
+                    noteId={note.id}
+                    value={draft.body}
+                    onChange={(body) => updateDraft({ body })}
+                    autoFocus={!focusTitle}
+                    className="h-full"
+                  />
+                </Suspense>
+              </ErrorBoundary>
             </div>
           </div>
         )}
@@ -794,7 +850,8 @@ export function NoteEditor({ note, readOnly = false, focusTitle = false, initial
               <MarkdownEditor
                 ref={editorRef}
                 key={editorKey}
-                onUploadsChange={handleUploadsChange}
+                onUploadsChange={(pending) => handleUploadsChange("markdown", pending)}
+                onDetachedUpload={handleDetachedUpload}
                 html={isHtml}
                 noteId={note.id}
                 value={draft.body}

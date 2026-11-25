@@ -231,6 +231,63 @@ test.describe("workspace features", () => {
     await page.evaluate(() => localStorage.removeItem("joplin-editor-mode"));
   });
 
+  test("keeps a PDF that is still uploading when switching from Split to Rich", async ({ page }) => {
+    const word = uniqueWord("richpdf");
+    await signIn(page);
+    await page.evaluate(() => localStorage.setItem("joplin-editor-mode", "split"));
+    await openNotebook(page, "Reading List", "nb-reading");
+    await page.getByRole("button", { name: "Create new note" }).click();
+    await page.getByRole("menuitem", { name: "Note", exact: true }).click();
+    await page.getByLabel("Note title").fill(`PDF ${word}`);
+
+    // Hold the upload until Rich has taken over (on a live server, inline OCR keeps a PDF upload busy for seconds)
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    await page.route("**/api/resources", async (route) => {
+      if (route.request().method() === "POST") await held;
+      await route.continue();
+    });
+    await page.locator('input[type="file"]').setInputFiles({
+      name: `${word}.pdf`,
+      mimeType: "application/pdf",
+      buffer: Buffer.from("%PDF-1.4\n%%EOF\n"),
+    });
+    await expect(page.locator(".cm-content")).toContainText(`Uploading ${word}.pdf…`);
+    await page.getByRole("button", { name: "Rich", exact: true }).click();
+    const richEditor = page.getByLabel("Rich note editor");
+    await expect(richEditor).toContainText(`Uploading ${word}.pdf…`);
+
+    release();
+    await expect(richEditor.getByRole("link", { name: `${word}.pdf`, exact: true })).toBeVisible();
+    await expect(richEditor).not.toContainText("Uploading");
+    await page.getByRole("button", { name: "Done", exact: true }).click();
+    // The saved note embeds the PDF
+    await expect(page.locator(".prose-content").getByText(`${word}.pdf`, { exact: true })).toBeVisible();
+
+    await page.unroute("**/api/resources");
+    await page.evaluate(() => localStorage.removeItem("joplin-editor-mode"));
+  });
+
+  test("keeps the editor open when the Rich editor can't be loaded", async ({ page }) => {
+    // What a tab opened before a deployment gets for a chunk that is gone: the app's index.html
+    await page.route(/\/RichEditor[-.][^/]*$/, (route) =>
+      route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>Joplin Web</title>" })
+    );
+    await signIn(page);
+    await page.evaluate(() => localStorage.setItem("joplin-editor-mode", "edit"));
+    await page.getByRole("button", { name: /^Book Notes: Deep Work/ }).click();
+    await page.getByRole("button", { name: "Edit", exact: true }).click();
+    await page.getByRole("button", { name: "Rich", exact: true }).click();
+
+    await expect(page.getByText("Rich editor could not be loaded")).toBeVisible();
+    await expect(page.getByLabel("Note title")).toHaveValue("Book Notes: Deep Work");
+    await page.getByRole("button", { name: "Switch to Edit" }).click();
+    await expect(page.locator(".cm-content")).toContainText("Focused work is a skill");
+    await page.getByRole("button", { name: "Done", exact: true }).click();
+
+    await page.evaluate(() => localStorage.removeItem("joplin-editor-mode"));
+  });
+
   test("manages Scratchpad, Global Tasks Hub, Hygiene Triage, and Web Clipper / Email Import", async ({ page }) => {
     const mailWord = uniqueWord("mail");
     await signIn(page);

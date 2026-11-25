@@ -255,6 +255,22 @@ export function noteMarkdownLink(note: { id: string; title: string }): string {
   return `[${escapeLinkText(note.title.trim() || "Untitled")}](:/${note.id})`;
 }
 
+/** Makes a file name safe for the brackets of an upload's link or placeholder (brackets become parentheses) */
+export function escapePlaceholderLabel(text: string): string {
+  return text.replace(/[[\]]/g, (c) => (c === "[" ? "(" : ")"));
+}
+
+const HTML_ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
+
+/** Link to an uploaded resource in the note's markup (Markdown, or HTML for HTML notes) */
+export function resourceLink(resource: { id: string; title: string }, isImage: boolean, html: boolean): string {
+  if (html) {
+    const title = resource.title.replace(/[&<>"]/g, (c) => HTML_ESCAPES[c]);
+    return isImage ? `<img src=":/${resource.id}" alt="${title}">` : `<a href=":/${resource.id}">${title}</a>`;
+  }
+  return `${isImage ? "!" : ""}[${escapePlaceholderLabel(resource.title)}](:/${resource.id})`;
+}
+
 const URL_ONLY = /^(?:https?:\/\/|mailto:|:\/)[^\s()]+$/;
 
 /**
