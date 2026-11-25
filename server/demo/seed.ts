@@ -357,6 +357,37 @@ Ship the new marketing site before the **end of Q4** with a faster, simpler stac
     hoursAgo: 12,
     body: `[2024_03_11.pdf](:/${demoId('res-invoice')})`,
   },
+  {
+    key: 'weekly-sync-copy',
+    notebook: 'meetings',
+    title: 'Sync Notes (Imported Copy)',
+    hoursAgo: 18,
+    body: `**Attendees:** Maya, Jonas, Priya
+
+1. Design system tokens are ready for review
+2. Build pipeline moved to the new runner, builds are ~40% faster
+3. Accessibility audit scheduled for next week
+
+**Decisions**
+
+- Dark mode ships together with the relaunch
+- Weekly sync moves to Thursdays`,
+  },
+  {
+    key: 'water-bill',
+    notebook: 'meetings',
+    title: '2024-04-01 Thames Water Annual Statement',
+    hoursAgo: 48,
+    tags: ['important'],
+    body: `[thames_water_2024.pdf](:/${demoId('res-water-a')})`,
+  },
+  {
+    key: 'water-bill-rescan',
+    notebook: 'meetings',
+    title: 'Scan_20240402_001.pdf',
+    hoursAgo: 14,
+    body: `[Scan_20240402_001.pdf](:/${demoId('res-water-b')})`,
+  },
 ];
 
 function minimalPdf(text: string): Buffer {
@@ -515,6 +546,78 @@ export function buildDemoItems(now = Date.now()): Map<string, MockItem> {
     now - 12 * HOUR
   );
   items.set(`.resource/${invoiceId}`, toItem(invoicePdf, now - 12 * HOUR, 'application/pdf'));
+
+  const waterAId = demoId('res-water-a');
+  const waterAPdf = minimalPdf('THAMES WATER ANNUAL STATEMENT 2024-04-01 GBP 486.20');
+  const waterAOcrText = [
+    'THAMES WATER UTILITIES LIMITED',
+    'Annual Water and Sewerage Account Statement',
+    'Customer Reference: 884120934',
+    'Billing Period: 01 April 2024 to 31 March 2025',
+    'Property Address: 42 Maple Gardens, Kingston upon Thames, KT1 2AB',
+    'Metered water supply charges for the period calculated on actual reading.',
+    'Direct debit instalment plan remains active on the first working day of each month.',
+    'Total Annual Charge: GBP 486.20',
+    'Monthly Direct Debit Payment: GBP 40.52',
+    'Thank you for managing your account online and keeping paper usage low.',
+  ].join('\n');
+  put(
+    waterAId,
+    serialize({
+      type_: JoplinItemType.Resource,
+      id: waterAId,
+      title: 'thames_water_2024.pdf',
+      createdTime: now - 48 * HOUR,
+      updatedTime: now - 48 * HOUR,
+      properties: {
+        mime: 'application/pdf',
+        filename: 'thames_water_2024.pdf',
+        file_extension: 'pdf',
+        size: String(waterAPdf.length),
+        encryption_applied: '0',
+        ocr_status: '2',
+        ocr_text: waterAOcrText,
+      },
+    }),
+    now - 48 * HOUR
+  );
+  items.set(`.resource/${waterAId}`, toItem(waterAPdf, now - 48 * HOUR, 'application/pdf'));
+
+  const waterBId = demoId('res-water-b');
+  const waterBPdf = minimalPdf('THAMES WATER ANNUAL STATEMENT 2024-04-01 GBP 486.20 RESCAN');
+  const waterBOcrText = [
+    'THAMES WATER UTILITIES LlMITED',
+    'Annual Water and Sewerage Account Statement',
+    'Customer Reference: 884120934',
+    'Billing Period: 01 April 2024 to 31 March 2025',
+    'Property Address: 42 Maple Gardens, Kingston upon Thames, KT1 2AB',
+    'Metered water supply charges for the period calculaled on actual reading.',
+    'Direct debit instalment plan remains active on the first working day of each month.',
+    'Total Annual Charge: GBP 486.20',
+    'Monthly Direct Debit Payment: GBP 40.52',
+    'Thank you for managing your account online and keeping paper usage low.',
+  ].join('\n');
+  put(
+    waterBId,
+    serialize({
+      type_: JoplinItemType.Resource,
+      id: waterBId,
+      title: 'Scan_20240402_001.pdf',
+      createdTime: now - 14 * HOUR,
+      updatedTime: now - 14 * HOUR,
+      properties: {
+        mime: 'application/pdf',
+        filename: 'Scan_20240402_001.pdf',
+        file_extension: 'pdf',
+        size: String(waterBPdf.length),
+        encryption_applied: '0',
+        ocr_status: '2',
+        ocr_text: waterBOcrText,
+      },
+    }),
+    now - 14 * HOUR
+  );
+  items.set(`.resource/${waterBId}`, toItem(waterBPdf, now - 14 * HOUR, 'application/pdf'));
 
   // Every sync target written by Joplin 2.x/3.x has an info.json (sync version 3), here without E2EE
   items.set('info.json', syncTargetInfoItem(false, now - 400 * HOUR));

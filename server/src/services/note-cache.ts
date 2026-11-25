@@ -17,9 +17,16 @@ import { extractInlineTasks } from './inline-tasks.js';
 import { reconstructRevisionContent, RevisionDiffRecord } from './revision-patch.js';
 import { trashedTogether } from './trash.js';
 import {
+  detectDuplicateClusters,
+  type DetectedDuplicateCluster,
+  type DuplicateNoteInput,
+} from './duplicates.js';
+import {
   DuplicateCluster,
+  DuplicateTier,
   FavoriteNotebookSummary,
   HydratedPreferences,
+  HygieneNoteAttachment,
   HygieneNoteItem,
   HygieneReport,
   InlineTaskItem,
@@ -258,6 +265,14 @@ export interface CacheEntry {
    * started before such a change must not apply the (older) content it fetched for that item.
    */
   localChanges: Map<string, number>;
+  /** Monotonic revision incremented whenever cached items change, for memoizing hygiene analysis */
+  contentVersion?: number;
+  /** Memoized duplicate clusters for the current `contentVersion` and dismissed-pairs key */
+  hygieneDuplicatesCache?: {
+    version: number;
+    dismissedKey: string;
+    clusters: DetectedDuplicateCluster[];
+  };
 }
 
 /** A user's cache entry as written to CACHE_DIR */
@@ -369,6 +384,7 @@ export class NoteCacheService {
         masterKeyIds: new Set(),
         unreadableItems: new Set(),
         localChanges: new Map(),
+        contentVersion: 0,
       };
       this.caches.set(key, entry);
     }
@@ -407,6 +423,7 @@ export class NoteCacheService {
       masterKeyIds: new Set(saved.masterKeyIds),
       unreadableItems: new Set(saved.unreadableItems),
       localChanges: new Map(),
+      contentVersion: 0,
     };
   }
 
@@ -629,14 +646,17 @@ export class NoteCacheService {
             switch (parsed.type_) {
               case JoplinItemType.Folder: // 2 = Folder / Notebook
                 entry.notebooks.set(parsed.id, parsed);
+                entry.contentVersion = (entry.contentVersion ?? 0) + 1;
                 break;
 
               case JoplinItemType.Note: // 1 = Note
                 entry.notes.set(parsed.id, parsed);
+                entry.contentVersion = (entry.contentVersion ?? 0) + 1;
                 break;
 
               case JoplinItemType.Tag: // 5 = Tag
                 entry.tags.set(parsed.id, parsed);
+                entry.contentVersion = (entry.contentVersion ?? 0) + 1;
                 break;
 
               case JoplinItemType.NoteTag: { // 6 = NoteTag link
@@ -647,12 +667,14 @@ export class NoteCacheService {
                 if (noteId && tagId) {
                   entry.noteTags.push({ id: parsed.id, noteId, tagId });
                 }
+                entry.contentVersion = (entry.contentVersion ?? 0) + 1;
                 break;
               }
 
               case JoplinItemType.Resource: { // 4 = Resource metadata
                 const resource = resourceMetadataOf(parsed);
                 entry.resources.set(resource.id, resource);
+                entry.contentVersion = (entry.contentVersion ?? 0) + 1;
                 break;
               }
 
@@ -768,18 +790,23 @@ export class NoteCacheService {
     this.trackEncryption(entry, item);
     if (item.type_ === JoplinItemType.Note) {
       entry.notes.set(item.id, item);
+      entry.contentVersion = (entry.contentVersion ?? 0) + 1;
     } else if (item.type_ === JoplinItemType.Folder) {
       entry.notebooks.set(item.id, item);
+      entry.contentVersion = (entry.contentVersion ?? 0) + 1;
     } else if (item.type_ === JoplinItemType.Tag) {
       entry.tags.set(item.id, item);
+      entry.contentVersion = (entry.contentVersion ?? 0) + 1;
     } else if (item.type_ === JoplinItemType.Resource) {
       const resource = resourceMetadataOf(item);
       entry.resources.set(resource.id, resource);
+      entry.contentVersion = (entry.contentVersion ?? 0) + 1;
     } else if (item.type_ === JoplinItemType.NoteTag) {
       const noteId = item.properties.note_id || '';
       const tagId = item.properties.tag_id || '';
       entry.noteTags = entry.noteTags.filter((link) => link.id !== item.id);
       if (noteId && tagId) entry.noteTags.push({ id: item.id, noteId, tagId });
+      entry.contentVersion = (entry.contentVersion ?? 0) + 1;
     } else if (item.type_ === JoplinItemType.Revision) {
       const itemId = detachString(item.properties.item_id || '');
       const itemType = Number(item.properties.item_type || 0);
@@ -842,6 +869,7 @@ export class NoteCacheService {
     entry.encryptedItemIds.delete(id);
     entry.masterKeyIds.delete(id);
     entry.unreadableItems.delete(`${id}.md`);
+    entry.contentVersion = (entry.contentVersion ?? 0) + 1;
   }
 
   /** Records whether an item is encrypted or a master key, for the writer's E2EE guard */
@@ -1914,7 +1942,15 @@ export class NoteCacheService {
     return { todoNotes, inlineTasks };
   }
 
-  public async getHygieneReport(sessionId: string): Promise<HygieneReport> {
+  public async getHygieneReport(
+    sessionId: string,
+    options: {
+      dismissedPairs?: ReadonlySet<string>;
+      tier?: DuplicateTier;
+      offset?: number;
+      limit?: number;
+    } = {}
+  ): Promise<HygieneReport> {
     const entry = await this.ensureFresh(sessionId);
     const deletedNotebookIds = this.deletedNotebookIdsOf(entry);
     const tagIdsByNote = this.tagIdsByNoteOf(entry);
@@ -1927,14 +1963,76 @@ export class NoteCacheService {
       if (this.isNoteActive(note, deletedNotebookIds)) activeNotes.push(note);
     }
 
-    const hygieneItem = (n: RawJoplinItem): HygieneNoteItem => {
+    const notebookPathCache = new Map<string, string>();
+    const pathForNotebook = (parentId: string): string => {
+      if (!parentId) return '';
+      const cached = notebookPathCache.get(parentId);
+      if (cached !== undefined) return cached;
+      const resolved = this.notebookPathOf(entry, parentId)
+        .map((crumb) => crumb.title)
+        .filter(Boolean)
+        .join(' / ');
+      notebookPathCache.set(parentId, resolved);
+      return resolved;
+    };
+
+    const linkedResourcesOf = (n: RawJoplinItem): ResourceMetadata[] => {
+      if (isEncrypted(n) || !n.body) return [];
+      const ids = extractLinkedResourceIds(n.body);
+      if (ids.length === 0) return [];
+      const out: ResourceMetadata[] = [];
+      for (const id of ids) {
+        const res = entry.resources.get(id);
+        if (res) out.push(res);
+      }
+      return out;
+    };
+
+    const hygieneItem = (n: RawJoplinItem, includeDetails = false): HygieneNoteItem => {
       const nb = n.parentId ? entry.notebooks.get(n.parentId) : null;
+      const nbPath = pathForNotebook(n.parentId || '');
       const preview = notePreview(n.body, markupLanguageOf(n.properties), 150);
-      return {
+      const noteTagIds = tagIdsByNote.get(n.id) ?? [];
+      const item: HygieneNoteItem = {
         ...this.toNoteListItem(entry, n, tagIdsByNote),
         notebookTitle: nb ? notebookTitle(nb) : '',
+        ...(nbPath ? { notebookPath: nbPath } : {}),
         previewLength: n.body.trim().length || preview.length,
+        tagCount: noteTagIds.length,
       };
+      if (includeDetails) {
+        const resolvedTags: Array<{ id: string; title: string }> = [];
+        for (const tid of noteTagIds) {
+          const tag = entry.tags.get(tid);
+          if (tag && (!tag.deletedTime || tag.deletedTime === 0)) {
+            resolvedTags.push({ id: tag.id, title: tagTitle(tag) });
+          }
+        }
+        resolvedTags.sort((a, b) => a.title.localeCompare(b.title));
+        item.tags = resolvedTags;
+
+        const linked = linkedResourcesOf(n);
+        if (linked.length > 0) {
+          const attachments: HygieneNoteAttachment[] = [];
+          let ocrLen = 0;
+          for (const res of linked) {
+            const name = res.filename || res.title || res.id;
+            const hasOcr = Boolean(res.ocrText && res.ocrText.trim());
+            if (hasOcr) ocrLen += res.ocrText.trim().length;
+            attachments.push({
+              id: res.id,
+              name,
+              mime: res.mime,
+              size: res.size,
+              kind: attachmentKindOf(res.mime, name),
+              hasOcr,
+            });
+          }
+          item.attachments = attachments;
+          if (ocrLen > 0) item.ocrTextLength = ocrLen;
+        }
+      }
+      return item;
     };
 
     // 1. Empty notes (no body text & unencrypted)
@@ -1942,120 +2040,94 @@ export class NoteCacheService {
       .filter((n) => !isEncrypted(n) && !n.body.trim())
       .sort((a, b) => b.updatedTime - a.updatedTime)
       .slice(0, 200)
-      .map(hygieneItem);
+      .map((n) => hygieneItem(n));
 
     // 2. Untagged notes
     const untaggedNotes = activeNotes
       .filter((n) => !taggedNoteIds.has(n.id))
       .sort((a, b) => b.updatedTime - a.updatedTime)
       .slice(0, 300)
-      .map(hygieneItem);
+      .map((n) => hygieneItem(n));
 
-    // 3. Duplicate clusters (exact normalized title + similar non-empty body)
+    // 3. Content-based duplicate clusters (computed once per cache contentVersion + dismissed-pairs hash)
+    const dismissedPairs = options.dismissedPairs ?? new Set<string>();
+    const dismissedKey =
+      dismissedPairs.size === 0
+        ? ''
+        : createHash('sha256')
+            .update(Array.from(dismissedPairs).sort().join(','))
+            .digest('hex');
+
+    const currentVersion = entry.contentVersion ?? 0;
+    let detected: DetectedDuplicateCluster[];
+    if (
+      entry.hygieneDuplicatesCache &&
+      entry.hygieneDuplicatesCache.version === currentVersion &&
+      entry.hygieneDuplicatesCache.dismissedKey === dismissedKey
+    ) {
+      detected = entry.hygieneDuplicatesCache.clusters;
+    } else {
+      const inputs: DuplicateNoteInput[] = [];
+      for (const n of activeNotes) {
+        if (isEncrypted(n)) continue;
+        const nb = n.parentId ? entry.notebooks.get(n.parentId) : null;
+        inputs.push({
+          note: n,
+          notebookTitle: nb ? notebookTitle(nb) : '',
+          notebookPath: pathForNotebook(n.parentId || ''),
+          tagCount: tagIdsByNote.get(n.id)?.length ?? 0,
+          linkedResources: linkedResourcesOf(n),
+        });
+      }
+      detected = detectDuplicateClusters(inputs, dismissedPairs);
+      entry.hygieneDuplicatesCache = {
+        version: currentVersion,
+        dismissedKey,
+        clusters: detected,
+      };
+    }
+
+    let identicalClusterCount = 0;
+    let nearClusterCount = 0;
+    for (const c of detected) {
+      if (c.tier === 'identical') identicalClusterCount++;
+      else nearClusterCount++;
+    }
+
+    const filtered = options.tier ? detected.filter((c) => c.tier === options.tier) : detected;
+    const offset = Math.max(0, Math.floor(options.offset ?? 0));
+    const sliced =
+      options.limit !== undefined && options.limit > 0
+        ? filtered.slice(offset, offset + Math.floor(options.limit))
+        : offset > 0
+          ? filtered.slice(offset)
+          : filtered;
+
     const duplicateClusters: DuplicateCluster[] = [];
-    const clusteredNoteIds = new Set<string>();
-
-    const byNormalizedTitle = new Map<string, RawJoplinItem[]>();
-    for (const n of activeNotes) {
-      if (isEncrypted(n)) continue;
-      const norm = n.title.trim().toLowerCase().replace(/\s+/g, ' ');
-      if (norm.length < 2 || norm === 'untitled' || norm === 'untitled note') continue;
-      const group = byNormalizedTitle.get(norm) ?? [];
-      group.push(n);
-      byNormalizedTitle.set(norm, group);
-    }
-
-    for (const [normTitle, group] of byNormalizedTitle) {
-      if (group.length < 2) continue;
-      group.sort((a, b) => b.updatedTime - a.updatedTime);
-      for (const n of group) clusteredNoteIds.add(n.id);
-      duplicateClusters.push({
-        id: `title-${group[0].id}`,
-        reason: 'exact-title',
-        score: 1,
-        notes: group.map(hygieneItem),
-      });
-      void normTitle;
-    }
-
-    // Near-duplicate content using inverted token index on up to 1500 non-empty notes
-    const candidates = activeNotes
-      .filter((n) => !isEncrypted(n) && !clusteredNoteIds.has(n.id) && n.body.trim().length >= 80)
-      .sort((a, b) => b.updatedTime - a.updatedTime)
-      .slice(0, 1500);
-
-    const tokenSets: Array<Set<string>> = [];
-    const inverted = new Map<string, number[]>();
-
-    for (let idx = 0; idx < candidates.length; idx++) {
-      const plain = notePreview(candidates[idx].body, markupLanguageOf(candidates[idx].properties), 1200).toLowerCase();
-      const rawTokens = plain.match(/[a-z0-9]{3,}|[\u4e00-\u9fff]{2}/g) ?? [];
-      const unique = new Set(rawTokens.slice(0, 120));
-      tokenSets.push(unique);
-      if (unique.size < 8) continue;
-      for (const tok of unique) {
-        const list = inverted.get(tok);
-        if (list) list.push(idx);
-        else inverted.set(tok, [idx]);
-      }
-    }
-
-    const parent = candidates.map((_, i) => i);
-    const find = (x: number): number => (parent[x] === x ? x : (parent[x] = find(parent[x])));
-    const unite = (a: number, b: number) => {
-      const ra = find(a);
-      const rb = find(b);
-      if (ra !== rb) parent[rb] = ra;
-    };
-    const maxScoreByRoot = new Map<number, number>();
-
-    const overlapCounts = new Map<number, number>();
-    for (let i = 0; i < candidates.length; i++) {
-      const setA = tokenSets[i];
-      if (setA.size < 8) continue;
-      overlapCounts.clear();
-      for (const tok of setA) {
-        const postings = inverted.get(tok);
-        if (!postings || postings.length > Math.max(50, candidates.length * 0.25)) continue;
-        for (const j of postings) {
-          if (j <= i) continue;
-          overlapCounts.set(j, (overlapCounts.get(j) ?? 0) + 1);
+    for (const c of sliced) {
+      const notes: HygieneNoteItem[] = [];
+      for (const id of c.noteIds) {
+        const raw = entry.notes.get(id);
+        if (raw && this.isNoteActive(raw, deletedNotebookIds)) {
+          notes.push(hygieneItem(raw, true));
         }
       }
-      for (const [j, overlap] of overlapCounts) {
-        const setB = tokenSets[j];
-        const union = setA.size + setB.size - overlap;
-        const jaccard = union > 0 ? overlap / union : 0;
-        if (jaccard >= 0.72) {
-          unite(i, j);
-          const root = find(i);
-          maxScoreByRoot.set(root, Math.max(maxScoreByRoot.get(root) ?? 0, jaccard));
-        }
-      }
-    }
-
-    const nearGroups = new Map<number, RawJoplinItem[]>();
-    for (let i = 0; i < candidates.length; i++) {
-      const root = find(i);
-      const arr = nearGroups.get(root) ?? [];
-      arr.push(candidates[i]);
-      nearGroups.set(root, arr);
-    }
-
-    for (const [root, group] of nearGroups) {
-      if (group.length < 2) continue;
-      group.sort((a, b) => b.updatedTime - a.updatedTime);
+      if (notes.length < 2) continue;
       duplicateClusters.push({
-        id: `content-${group[0].id}`,
-        reason: 'similar-content',
-        score: Math.round((maxScoreByRoot.get(root) ?? 0.75) * 100) / 100,
-        notes: group.map(hygieneItem),
+        id: c.id,
+        tier: c.tier,
+        score: c.score,
+        evidence: c.evidence,
+        suggestedKeeperId: c.suggestedKeeperId,
+        notes,
       });
     }
 
-    duplicateClusters.sort((a, b) => b.notes.length - a.notes.length || b.score - a.score);
     return {
-      duplicateClusters: duplicateClusters.slice(0, 50),
+      duplicateClusters,
+      totalDuplicateClusters: detected.length,
+      identicalClusterCount,
+      nearClusterCount,
       emptyNotes,
       untaggedNotes,
     };
