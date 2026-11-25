@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { describe, test } from 'node:test';
 import {
   canonicalPairKey,
+  countWordsInNormalized,
   detectDuplicateClusters,
   isInboxLikeNotebook,
+  normalizeContentText,
+  tokenizeWords,
   type DuplicateNoteInput,
 } from '../src/services/duplicates.js';
 import { JoplinItemType, type RawJoplinItem, type ResourceMetadata } from '../src/types/index.js';
@@ -482,5 +487,140 @@ describe('content-based duplicate detection', () => {
     assert.equal(identicalCount, 15, 'should detect all 15 injected identical scan pairs');
     assert.equal(nearCount, 10, 'should detect all 10 injected near OCR pairs (and zero statement false positives)');
     assert.ok(elapsedMs < 2000, `expected < 2000 ms on 10k notes, took ${elapsedMs.toFixed(1)} ms`);
+  });
+
+  test('countWordsInNormalized matches tokenizeWords across ASCII, contractions, Latin, and CJK', () => {
+    const samples = [
+      '',
+      '   ',
+      'hello world',
+      "don't stop believing in o'clock 2024's can't've",
+      'foo\'\'bar -- baz!! £1,234.56 (test)',
+      'café résumé naïve l’école über',
+      '混合English與中文123測試',
+      '日本語のテストとabc_def',
+      'a\'b c’d \'leading\' trailing\'',
+    ];
+    for (const raw of samples) {
+      const norm = normalizeContentText(raw);
+      assert.equal(
+        countWordsInNormalized(norm),
+        tokenizeWords(norm).length,
+        `word count mismatch for ${JSON.stringify(raw)}`
+      );
+    }
+  });
+
+  test('identical tier hashes the full text even past the near-duplicate prefix cap', () => {
+    // 100k chars shared prefix (well beyond 40k near-prefix cap), differing only near the end
+    const sharedHead = Array.from({ length: 12_000 }, (_, i) => `section${i % 300}word${i}`).join(' ');
+    const tailA = ' final audit conclusion approved ref alpha 9001.';
+    const tailB = ' final audit conclusion rejected ref beta 9002.';
+
+    const a = makeNote('long-diff-a', {
+      title: 'Long Doc A',
+      createdTime: 1000,
+      resources: [{ key: 'ld-a', size: 800_000, ocrText: sharedHead + tailA }],
+    });
+    const b = makeNote('long-diff-b', {
+      title: 'Long Doc B',
+      createdTime: 2000,
+      resources: [{ key: 'ld-b', size: 800_000, ocrText: sharedHead + tailB }],
+    });
+
+    const clusters = detectDuplicateClusters([a, b]);
+    assert.equal(clusters.length, 1);
+    assert.equal(clusters[0].tier, 'near', 'notes differing past the prefix must not be marked identical');
+  });
+
+  test('detects identical and near duplicates with multiple OCR attachments regardless of link order', () => {
+    const ocr1 = 'First scanned page of insurance policy number POL-778899 valid from 10 May 2024 covering residential property.';
+    const ocr2 = 'Second scanned page listing schedule of endorsements, excess £250.00, and emergency claims hotline.';
+
+    const a = makeNote('multi-ocr-a', {
+      title: 'Policy A',
+      notebookTitle: 'Insurance',
+      createdTime: 1000,
+      resources: [
+        { key: 'm-a1', size: 100_000, ocrText: ocr1 },
+        { key: 'm-a2', size: 120_000, ocrText: ocr2 },
+      ],
+    });
+    const b = makeNote('multi-ocr-b', {
+      title: 'Policy B',
+      notebookTitle: 'Inbox',
+      createdTime: 2000,
+      resources: [
+        { key: 'm-b2', size: 120_000, ocrText: ocr2 },
+        { key: 'm-b1', size: 100_000, ocrText: ocr1 },
+      ],
+    });
+
+    const clusters = detectDuplicateClusters([a, b]);
+    assert.equal(clusters.length, 1);
+    assert.equal(clusters[0].tier, 'identical');
+    assert.equal(clusters[0].suggestedKeeperId, a.note.id);
+  });
+
+  test('stays under 120 MB delta and 3 s on a realistic 12k-note corpus inside --max-old-space-size=1024', () => {
+    const workerPath = fileURLToPath(new URL('./duplicates-memory-worker.ts', import.meta.url));
+    const tsxImport = import.meta.resolve('tsx');
+    const run = spawnSync(
+      process.execPath,
+      ['--max-old-space-size=1024', '--expose-gc', '--import', tsxImport, workerPath],
+      {
+        encoding: 'utf8',
+        timeout: 60_000,
+      }
+    );
+
+    assert.equal(
+      run.status,
+      0,
+      `memory worker failed (status=${run.status}, signal=${run.signal})\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`
+    );
+
+    const lastLine = run.stdout.trim().split('\n').pop() ?? '';
+    const metrics = JSON.parse(lastLine) as {
+      noteCount: number;
+      totalTextMB: number;
+      buildMs: number;
+      detectMs: number;
+      baselineHeapUsedMB: number;
+      afterHeapUsedMB: number;
+      heapUsedDeltaMB: number;
+      arrayBuffersDeltaMB: number;
+      combinedDeltaMB: number;
+      postGcHeapDeltaMB: number;
+      rssDeltaMB: number;
+      identicalFound: number;
+      identicalExpected: number;
+      nearFound: number;
+      nearExpected: number;
+    };
+
+    console.log(
+      `[MemPerf] ${metrics.noteCount} notes (${metrics.totalTextMB} MB text): ` +
+        `${metrics.detectMs} ms | baseline ${metrics.baselineHeapUsedMB} MB | ` +
+        `heapDelta ${metrics.heapUsedDeltaMB} MB | abDelta ${metrics.arrayBuffersDeltaMB} MB | ` +
+        `combinedDelta ${metrics.combinedDeltaMB} MB | postGcDelta ${metrics.postGcHeapDeltaMB} MB | ` +
+        `found ${metrics.identicalFound}/${metrics.identicalExpected} identical, ` +
+        `${metrics.nearFound}/${metrics.nearExpected} near`
+    );
+
+    assert.equal(metrics.identicalFound, metrics.identicalExpected);
+    assert.equal(metrics.nearFound, metrics.nearExpected);
+    assert.ok(
+      metrics.heapUsedDeltaMB < 120,
+      `expected heapUsed delta < 120 MB, got ${metrics.heapUsedDeltaMB} MB`
+    );
+    assert.ok(
+      metrics.combinedDeltaMB < 120,
+      `expected combined (heapUsed + arrayBuffers) delta < 120 MB, got ${metrics.combinedDeltaMB} MB`
+    );
+    assert.ok(
+      metrics.detectMs < 3000,
+      `expected detection duration < 3000 ms, took ${metrics.detectMs} ms`
+    );
   });
 });
