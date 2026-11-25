@@ -38,6 +38,16 @@ const MIN_LENGTH_RATIO = 0.7;
 const MIN_FACT_JACCARD = 0.75;
 /** Minimum Jaccard agreement on explicit month/quarter tokens when both notes contain them */
 const MIN_MONTH_JACCARD = 0.75;
+/** Minimum Jaccard agreement on full-text calendar dates when both notes contain dates */
+const MIN_DATE_JACCARD = 0.8;
+/** Minimum Jaccard agreement on full-text money amounts when both notes contain >= MIN_AMOUNT_VETO_COUNT amounts */
+const MIN_AMOUNT_JACCARD = 0.8;
+/** Minimum distinct money amounts in both notes for the amount veto to apply */
+const MIN_AMOUNT_VETO_COUNT = 3;
+/** Cap on unique full-text dates retained per note during streaming extraction */
+const MAX_EXTRACTED_DATES = 200;
+/** Cap on unique full-text money amounts retained per note during streaming extraction */
+const MAX_EXTRACTED_AMOUNTS = 200;
 /** Minimum total attachment byte-size ratio for near-duplicate notes with attachments */
 const MIN_ATTACHMENT_SIZE_RATIO = 0.65;
 
@@ -98,6 +108,51 @@ const MAY_DATE_RE = /\b(?:may\s+\d{1,4}|\d{1,2}(?:st|nd|rd|th)?\s+may)\b/g;
 const QUARTER_RE = /\bq[1-4]\b/g;
 const ALPHA_WORD_RE = /[a-z]{3,9}/g;
 
+const MONTH_NUM_BY_NAME: Record<string, number> = {
+  jan: 1,
+  january: 1,
+  feb: 2,
+  february: 2,
+  mar: 3,
+  march: 3,
+  apr: 4,
+  april: 4,
+  may: 5,
+  jun: 6,
+  june: 6,
+  jul: 7,
+  july: 7,
+  aug: 8,
+  august: 8,
+  sep: 9,
+  sept: 9,
+  september: 9,
+  oct: 10,
+  october: 10,
+  nov: 11,
+  november: 11,
+  dec: 12,
+  december: 12,
+};
+
+const DAYS_IN_MONTH = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+const MONTH_NAME_PATTERN =
+  'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
+const DATE_YMD_RE = /(?<!\d)(?<!\d\.)((?:19|20)\d{2})([-/.])(\d{1,2})\2(\d{1,2})(?!\d)(?!\.\d)/g;
+const DATE_CJK_YMD_RE = /(?<!\d)((?:19|20)\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/g;
+const DATE_DMY_MDY_RE = /(?<!\d)(?<!\d\.)(\d{1,2})([-/.])(\d{1,2})\2((?:19|20)\d{2})(?!\d)(?!\.\d)/g;
+const DATE_D_MON_Y_RE = new RegExp(
+  `(?<!\\d)(\\d{1,2})(?:st|nd|rd|th)?[\\s/-]+(${MONTH_NAME_PATTERN})\\.?(?:\\s*,\\s*|\\s+|[-/])((?:19|20)\\d{2})(?!\\d)`,
+  'gi'
+);
+const DATE_MON_D_Y_RE = new RegExp(
+  `\\b(${MONTH_NAME_PATTERN})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:\\s*,\\s*|\\s+)((?:19|20)\\d{2})(?!\\d)`,
+  'gi'
+);
+const MONEY_AMOUNT_RE = /(?<![\d,])(?<!\d\.)(?:\d{1,3}(?:,\d{3})+|\d{1,9})\.\d{2}(?!\d)(?!\.\d)/g;
+const FULLWIDTH_RE = /[\uff00-\uffef]/;
+const LEADING_TITLE_DATE_RE = /^\s*((?:19|20)\d{2})([-/])(\d{2})(?:\2(\d{2}))?(?!\d)/;
+
 const EMPTY_ATTACHMENTS: AttachmentSpec[] = [];
 const EMPTY_UINT32 = new Uint32Array(0);
 
@@ -128,6 +183,8 @@ interface NoteFingerprint {
   inputIndex: number;
   noteId: string;
   title: string;
+  /** Leading YYYY-MM or YYYY-MM-DD from title, used strictly as a near-duplicate veto */
+  titleDate: string;
   createdTime: number;
   updatedTime: number;
   tagCount: number;
@@ -149,6 +206,9 @@ interface NoteFingerprint {
   wordHashes?: Uint32Array;
   factHashes?: Uint32Array;
   monthMask?: number;
+  /** Lazily populated ONLY when a candidate pair passes word Jaccard + prefix fact check */
+  dateCodes?: Uint32Array;
+  amountHashes?: Uint32Array;
 }
 
 /**
@@ -825,7 +885,226 @@ function attachmentsCompatible(a: NoteFingerprint, b: NoteFingerprint): boolean 
   return true;
 }
 
-function factsAgree(a: NoteFingerprint, b: NoteFingerprint): { ok: boolean; agreedOnFacts: boolean } {
+function isValidCalendarDate(year: number, month: number, day: number): boolean {
+  if (year < 1900 || year > 2099 || month < 1 || month > 12 || day < 1) return false;
+  const maxDay =
+    month === 2 && ((year % 4 === 0 && year % 100 !== 0) || year % 400 === 0)
+      ? 29
+      : DAYS_IN_MONTH[month];
+  return day <= maxDay;
+}
+
+function packDateCode(year: number, month: number, day: number): number {
+  return year * 10_000 + month * 100 + day;
+}
+
+function formatPackedDateCode(code: number): string {
+  const year = Math.floor(code / 10_000);
+  const month = Math.floor((code % 10_000) / 100);
+  const day = code % 100;
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+/**
+ * Extracts a leading `YYYY-MM` or `YYYY-MM-DD` date prefix from a note title, or `''` if absent/invalid.
+ * Used strictly as a near-duplicate veto, never as positive match evidence.
+ */
+export function extractLeadingTitleDate(title: string): string {
+  if (!title) return '';
+  const m = LEADING_TITLE_DATE_RE.exec(title);
+  if (!m) return '';
+  const year = Number(m[1]);
+  const month = Number(m[3]);
+  if (month < 1 || month > 12) return '';
+  if (m[4] !== undefined) {
+    const day = Number(m[4]);
+    if (!isValidCalendarDate(year, month, day)) return '';
+    return `${m[1]}-${m[3]}-${m[4]}`;
+  }
+  return `${m[1]}-${m[3]}`;
+}
+
+/**
+ * Returns true when both leading title dates are present and incompatible (neither is a prefix of the other).
+ * E.g. `2023-02-04` vs `2023-02` is compatible (`false`); `2022-10-11` vs `2022-11-10` conflicts (`true`).
+ */
+export function titleDatesConflict(dateA: string, dateB: string): boolean {
+  if (!dateA || !dateB) return false;
+  return !dateA.startsWith(dateB) && !dateB.startsWith(dateA);
+}
+
+/**
+ * Streams raw text in bounded whitespace-aligned slices with a small token-aligned overlap
+ * (up to 3 words / 64 chars) so multi-word dates straddling a 16 KB boundary are never missed,
+ * without allocating normalized/lowercased full-chunk copies.
+ */
+function streamRawOverlapChunks(
+  raw: string,
+  onChunk: (chunk: string) => boolean | void
+): void {
+  const len = raw.length;
+  if (len === 0) return;
+  if (len <= NORM_CHUNK_CHARS) {
+    onChunk(raw);
+    return;
+  }
+
+  let pos = 0;
+  while (pos < len) {
+    let end = Math.min(len, pos + NORM_CHUNK_CHARS);
+    if (end < len) {
+      let split = end;
+      while (split > pos && !isAsciiWs(raw.charCodeAt(split))) {
+        split--;
+      }
+      if (split > pos) {
+        end = split;
+      } else {
+        split = end;
+        while (split < len && !isAsciiWs(raw.charCodeAt(split))) {
+          split++;
+        }
+        end = split;
+      }
+    }
+
+    if (onChunk(raw.slice(pos, end)) === false) return;
+    if (end >= len) break;
+
+    let nextPos = end;
+    while (nextPos < len && isAsciiWs(raw.charCodeAt(nextPos))) nextPos++;
+    if (nextPos >= len) break;
+
+    const minBack = Math.max(pos + 1, end - 64);
+    let overlapStart = nextPos;
+    let wsGroups = 0;
+    let i = end - 1;
+    while (i >= minBack) {
+      while (i >= minBack && isAsciiWs(raw.charCodeAt(i))) i--;
+      if (i < minBack) break;
+      while (i >= minBack && !isAsciiWs(raw.charCodeAt(i))) i--;
+      if (i >= minBack && isAsciiWs(raw.charCodeAt(i))) {
+        overlapStart = i + 1;
+        wsGroups++;
+        if (wsGroups === 3) break;
+      } else {
+        break;
+      }
+    }
+    pos = overlapStart > pos ? overlapStart : nextPos;
+  }
+}
+
+function scanChunkDatesAndAmounts(
+  rawChunk: string,
+  dates: Set<number>,
+  amounts: Set<number> | null
+): void {
+  if (!rawChunk) return;
+  const text = FULLWIDTH_RE.test(rawChunk) ? rawChunk.normalize('NFKC') : rawChunk;
+
+  if (dates.size < MAX_EXTRACTED_DATES && (text.includes('20') || text.includes('19'))) {
+    let m: RegExpExecArray | null;
+
+    DATE_YMD_RE.lastIndex = 0;
+    while (dates.size < MAX_EXTRACTED_DATES && (m = DATE_YMD_RE.exec(text)) !== null) {
+      const y = Number(m[1]);
+      const mo = Number(m[3]);
+      const d = Number(m[4]);
+      if (isValidCalendarDate(y, mo, d)) {
+        dates.add(packDateCode(y, mo, d));
+      }
+    }
+
+    if (dates.size < MAX_EXTRACTED_DATES && text.includes('年')) {
+      DATE_CJK_YMD_RE.lastIndex = 0;
+      while (dates.size < MAX_EXTRACTED_DATES && (m = DATE_CJK_YMD_RE.exec(text)) !== null) {
+        const y = Number(m[1]);
+        const mo = Number(m[2]);
+        const d = Number(m[3]);
+        if (isValidCalendarDate(y, mo, d)) {
+          dates.add(packDateCode(y, mo, d));
+        }
+      }
+    }
+
+    if (dates.size < MAX_EXTRACTED_DATES) {
+      DATE_DMY_MDY_RE.lastIndex = 0;
+      while (dates.size < MAX_EXTRACTED_DATES && (m = DATE_DMY_MDY_RE.exec(text)) !== null) {
+        const a = Number(m[1]);
+        const b = Number(m[3]);
+        const y = Number(m[4]);
+        // Disambiguate DD/MM vs MM/DD symmetrically: include both readings whenever both are valid
+        if (isValidCalendarDate(y, b, a)) {
+          dates.add(packDateCode(y, b, a));
+        }
+        if (a !== b && isValidCalendarDate(y, a, b)) {
+          dates.add(packDateCode(y, a, b));
+        }
+      }
+    }
+
+    if (dates.size < MAX_EXTRACTED_DATES) {
+      DATE_D_MON_Y_RE.lastIndex = 0;
+      while (dates.size < MAX_EXTRACTED_DATES && (m = DATE_D_MON_Y_RE.exec(text)) !== null) {
+        const d = Number(m[1]);
+        const mo = MONTH_NUM_BY_NAME[m[2].toLowerCase()];
+        const y = Number(m[3]);
+        if (mo && isValidCalendarDate(y, mo, d)) {
+          dates.add(packDateCode(y, mo, d));
+        }
+      }
+    }
+
+    if (dates.size < MAX_EXTRACTED_DATES) {
+      DATE_MON_D_Y_RE.lastIndex = 0;
+      while (dates.size < MAX_EXTRACTED_DATES && (m = DATE_MON_D_Y_RE.exec(text)) !== null) {
+        const mo = MONTH_NUM_BY_NAME[m[1].toLowerCase()];
+        const d = Number(m[2]);
+        const y = Number(m[3]);
+        if (mo && isValidCalendarDate(y, mo, d)) {
+          dates.add(packDateCode(y, mo, d));
+        }
+      }
+    }
+  }
+
+  if (amounts && amounts.size < MAX_EXTRACTED_AMOUNTS && text.includes('.')) {
+    MONEY_AMOUNT_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while (amounts.size < MAX_EXTRACTED_AMOUNTS && (m = MONEY_AMOUNT_RE.exec(text)) !== null) {
+      let clean = m[0];
+      if (clean.includes(',')) clean = clean.replace(/,/g, '');
+      if (clean.length > 4 && clean.charCodeAt(0) === 48) {
+        clean = clean.replace(/^0+(?=\d)/, '');
+      }
+      amounts.add(hashString32(clean));
+    }
+  }
+}
+
+function setToSortedUint32(set: Set<number>): Uint32Array {
+  if (set.size === 0) return EMPTY_UINT32;
+  const arr = Uint32Array.from(set);
+  arr.sort();
+  return arr;
+}
+
+/**
+ * Streams raw text in bounded chunks and returns sorted normalized `YYYY-MM-DD` calendar dates
+ * (capped at `MAX_EXTRACTED_DATES`). Used by full-text date veto and unit tests.
+ */
+export function extractNormalizedDates(raw: string): string[] {
+  if (!raw) return [];
+  const dates = new Set<number>();
+  streamRawOverlapChunks(raw, (chunk) => {
+    scanChunkDatesAndAmounts(chunk, dates, null);
+    if (dates.size >= MAX_EXTRACTED_DATES) return false;
+  });
+  return Array.from(setToSortedUint32(dates), formatPackedDateCode);
+}
+
+function factsAgree(a: NoteFingerprint, b: NoteFingerprint): boolean {
   const maskA = a.monthMask ?? 0;
   const maskB = b.monthMask ?? 0;
   const monthsCountA = popcount16(maskA);
@@ -833,24 +1112,59 @@ function factsAgree(a: NoteFingerprint, b: NoteFingerprint): { ok: boolean; agre
   if (monthsCountA > 0 && monthsCountB > 0) {
     const inter = popcount16(maskA & maskB);
     const union = monthsCountA + monthsCountB - inter;
-    if (union > 0 && inter / union < MIN_MONTH_JACCARD) return { ok: false, agreedOnFacts: false };
+    if (union > 0 && inter / union < MIN_MONTH_JACCARD) return false;
   } else if (Math.max(monthsCountA, monthsCountB) >= 2) {
-    return { ok: false, agreedOnFacts: false };
+    return false;
   }
 
   const factsA = a.factHashes ?? EMPTY_UINT32;
   const factsB = b.factHashes ?? EMPTY_UINT32;
   if (factsA.length === 0 && factsB.length === 0) {
-    return { ok: true, agreedOnFacts: false };
+    return true;
   }
   if (factsA.length === 0 || factsB.length === 0) {
-    return { ok: Math.max(factsA.length, factsB.length) <= 1, agreedOnFacts: false };
+    return Math.max(factsA.length, factsB.length) <= 1;
   }
-  const f = sortedUint32JaccardStats(factsA, factsB);
-  if (f.jaccard < MIN_FACT_JACCARD) {
-    return { ok: false, agreedOnFacts: false };
+  return sortedUint32JaccardStats(factsA, factsB).jaccard >= MIN_FACT_JACCARD;
+}
+
+function fullContentDatesAmountsAgree(
+  a: NoteFingerprint,
+  b: NoteFingerprint
+): { ok: boolean; agreedOnDatesAmounts: boolean } {
+  const datesA = a.dateCodes ?? EMPTY_UINT32;
+  const datesB = b.dateCodes ?? EMPTY_UINT32;
+  const amountsA = a.amountHashes ?? EMPTY_UINT32;
+  const amountsB = b.amountHashes ?? EMPTY_UINT32;
+
+  const hasDatesA = datesA.length > 0;
+  const hasDatesB = datesB.length > 0;
+  const datesJaccard =
+    hasDatesA && hasDatesB ? sortedUint32Jaccard(datesA, datesB) : hasDatesA || hasDatesB ? 0 : 1;
+
+  if (hasDatesA && hasDatesB && datesJaccard < MIN_DATE_JACCARD) {
+    return { ok: false, agreedOnDatesAmounts: false };
   }
-  return { ok: true, agreedOnFacts: f.inter > 0 };
+
+  const hasAmountsA = amountsA.length > 0;
+  const hasAmountsB = amountsB.length > 0;
+  const amountsJaccard =
+    hasAmountsA && hasAmountsB ? sortedUint32Jaccard(amountsA, amountsB) : hasAmountsA || hasAmountsB ? 0 : 1;
+
+  if (
+    amountsA.length >= MIN_AMOUNT_VETO_COUNT &&
+    amountsB.length >= MIN_AMOUNT_VETO_COUNT &&
+    amountsJaccard < MIN_AMOUNT_JACCARD
+  ) {
+    return { ok: false, agreedOnDatesAmounts: false };
+  }
+
+  const agreedOnDatesAmounts =
+    (hasDatesA || hasDatesB || hasAmountsA || hasAmountsB) &&
+    datesJaccard >= MIN_DATE_JACCARD &&
+    amountsJaccard >= MIN_AMOUNT_JACCARD;
+
+  return { ok: true, agreedOnDatesAmounts };
 }
 
 function buildIdenticalEvidence(fp: NoteFingerprint): string {
@@ -989,6 +1303,46 @@ function extractBoundedNearPrefix(input: DuplicateNoteInput, ocrOrder?: number[]
   }
 
   return acc.build();
+}
+
+/**
+ * Streams the full normalized body + OCR text of a note (in canonical attachment order) to extract
+ * capped sorted sets of calendar date codes and money amount hashes without retaining full-text copies.
+ */
+function extractFullContentDatesAndAmounts(
+  input: DuplicateNoteInput,
+  ocrOrder?: number[]
+): { dateCodes: Uint32Array; amountHashes: Uint32Array } {
+  const dates = new Set<number>();
+  const amounts = new Set<number>();
+  const isFull = () => dates.size >= MAX_EXTRACTED_DATES && amounts.size >= MAX_EXTRACTED_AMOUNTS;
+
+  const scanPart = (raw: string) => {
+    if (!raw || isFull()) return;
+    streamRawOverlapChunks(raw, (chunk) => {
+      scanChunkDatesAndAmounts(chunk, dates, amounts);
+      if (isFull()) return false;
+    });
+  };
+
+  const plainBody = extractPlainBody(input.note, input.linkedResources);
+  if (plainBody) {
+    scanPart(plainBody);
+  }
+
+  if (!isFull() && input.linkedResources.length > 0) {
+    const indices = ocrOrder ?? input.linkedResources.map((_, idx) => idx);
+    for (let k = 0; k < indices.length && !isFull(); k++) {
+      const res = input.linkedResources[indices[k]];
+      if (!res?.ocrText || isBlank(res.ocrText)) continue;
+      scanPart(res.ocrText);
+    }
+  }
+
+  return {
+    dateCodes: setToSortedUint32(dates),
+    amountHashes: setToSortedUint32(amounts),
+  };
 }
 
 function streamPartLength(
@@ -1190,10 +1544,12 @@ function buildFingerprint(
     }
   }
 
+  const title = note.title || '';
   return {
     inputIndex,
     noteId: note.id,
-    title: note.title || '',
+    title,
+    titleDate: extractLeadingTitleDate(title),
     createdTime: note.createdTime,
     updatedTime: note.updatedTime,
     tagCount,
@@ -1221,8 +1577,8 @@ interface NearEdge {
 
 /**
  * Detects content-based duplicate clusters (`identical` and `near`) across all provided active,
- * unencrypted notes. Never uses note title as match evidence, avoids transitive chaining, and
- * filters out dismissed note pairs.
+ * unencrypted notes. Never uses note title as positive match evidence (leading title dates act
+ * only as a near-duplicate veto), avoids transitive chaining, and filters out dismissed note pairs.
  */
 export function detectDuplicateClusters(
   inputs: DuplicateNoteInput[],
@@ -1396,7 +1752,15 @@ export function detectDuplicateClusters(
       fp.monthMask = factual.monthMask;
     };
 
-    // Pass 3: collect candidate pairs and verify exact shingle + word + fact + attachment criteria
+    // Lazily stream full body+OCR text for dates/amounts ONLY when a pair passes word Jaccard + prefix fact checks
+    const ensureFullContentDatesAmounts = (fp: NoteFingerprint) => {
+      if (fp.dateCodes !== undefined) return;
+      const extracted = extractFullContentDatesAndAmounts(inputs[fp.inputIndex], fp.ocrOrder);
+      fp.dateCodes = extracted.dateCodes;
+      fp.amountHashes = extracted.amountHashes;
+    };
+
+    // Pass 3: collect candidate pairs and verify exact shingle + word + fact + date/amount + attachment criteria
     const edges: NearEdge[] = [];
     const overlapCounts = new Map<number, number>();
 
@@ -1430,6 +1794,9 @@ export function detectDuplicateClusters(
 
         if (!attachmentsCompatible(fpA, fpB)) continue;
 
+        // Rule 3: Title-date veto (incompatible leading YYYY-MM / YYYY-MM-DD dates)
+        if (titleDatesConflict(fpA.titleDate, fpB.titleDate)) continue;
+
         const shingleJaccard = sortedUint32Jaccard(shinglesA, fpB.shingles!);
         if (shingleJaccard < MIN_SHINGLE_JACCARD) continue;
 
@@ -1439,11 +1806,21 @@ export function detectDuplicateClusters(
         const wJaccard = sortedUint32Jaccard(fpA.wordHashes!, fpB.wordHashes!);
         if (wJaccard < MIN_WORD_JACCARD) continue;
 
-        const factCheck = factsAgree(fpA, fpB);
-        if (!factCheck.ok) continue;
+        if (!factsAgree(fpA, fpB)) continue;
+
+        ensureFullContentDatesAmounts(fpA);
+        ensureFullContentDatesAmounts(fpB);
+
+        const fullContentCheck = fullContentDatesAmountsAgree(fpA, fpB);
+        if (!fullContentCheck.ok) continue;
 
         const displayScore = Math.min(0.99, Math.round(Math.max(wJaccard, shingleJaccard) * 100) / 100);
-        edges.push({ a: i, b: j, score: displayScore, agreedOnFacts: factCheck.agreedOnFacts });
+        edges.push({
+          a: i,
+          b: j,
+          score: displayScore,
+          agreedOnFacts: fullContentCheck.agreedOnDatesAmounts,
+        });
       }
     }
 

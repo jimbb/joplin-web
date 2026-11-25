@@ -7,8 +7,11 @@ import {
   canonicalPairKey,
   countWordsInNormalized,
   detectDuplicateClusters,
+  extractLeadingTitleDate,
+  extractNormalizedDates,
   isInboxLikeNotebook,
   normalizeContentText,
+  titleDatesConflict,
   tokenizeWords,
   type DuplicateNoteInput,
 } from '../src/services/duplicates.js';
@@ -173,59 +176,371 @@ describe('content-based duplicate detection', () => {
     assert.equal(clusters.length, 0);
   });
 
-  test('does not match monthly bank statements sharing boilerplate but differing in dates and amounts', () => {
-    const makeStatement = (key: string, month: string, dateRange: string, txns: string[], balance: string, size: number) =>
-      makeNote(key, {
-        title: `Bank Statement ${month} 2024`,
-        notebookTitle: 'Banking',
+  test('does not match realistic monthly bank statements across 12 months, yet matches a noisy rescan of the same month', () => {
+    // ~95% shared boilerplate including many static numbers (account no., sort code, phone numbers,
+    // regulatory IDs, and a full static fee schedule) so prefix number Jaccard stays high.
+    const staticHeader = [
+      'HSBC UK BANK PLC — CONSOLIDATED MONTHLY CURRENT ACCOUNT STATEMENT',
+      'Authorised by the Prudential Regulation Authority and regulated by the Financial Conduct Authority (Firm Reference Number 765112).',
+      'Registered Office: 1 Centenary Square, Birmingham B1 1HQ. Company Number 09928412.',
+      'Account Holder: Jimmy Kwok | Sort Code: 40-11-60 | Account Number: 81492037 | IBAN: GB29HBUK40116081492037 | BIC: HBUKGB4B',
+      '24-hour Telephone Banking: 03457 404 404 | From abroad: +44 1226 261 010 | Lost or stolen cards: 0800 085 2401 | Textphone: 03457 125 563.',
+    ].join('\n');
+
+    const staticFeeAndLegalBoilerplate = [
+      'STANDARD TARIFF & SCHEDULE OF CHARGES (EFFECTIVE FOR PERSONAL CURRENT ACCOUNTS)',
+      'Monthly Account Maintenance Fee: £0.00 | Paper Statement Duplicate Copy: £5.00 | Stopped Cheque Fee: £10.00',
+      'CHAPS Same-Day UK Transfer: £25.00 | International SWIFT Wire Transfer: £17.50 | Banker Draft Issuance: £15.00',
+      'Foreign Currency Cash Withdrawal Minimum Fee: £3.00 | Non-Sterling Debit Card Fee Cap: £12.50',
+      'Unarranged Overdraft Monthly Cap: £20.00 | Returned Direct Debit Notice Fee: £8.00 | Express Card Courier: £35.00',
+      'Arranged Overdraft Buffer: £250.00 | Daily ATM Cash Withdrawal Limit: £500.00 | Faster Payment Single Limit: £25,000.00',
+      'Representative EAR on Arranged Overdraft: 39.90% variable | Credit Interest Tier 1 Threshold: £1,000.00 | Tier 2 Threshold: £5,000.00.',
+      'Your eligible deposits with HSBC UK Bank plc are protected up to a total of £85,000.00 by the Financial Services Compensation Scheme (FSCS), the UK deposit guarantee scheme.',
+      'For joint accounts the statutory protection limit applies separately to each eligible account holder up to £170,000.00 combined.',
+      'Direct Debit Guarantee: This guarantee is offered by all banks and building societies that accept instructions to pay Direct Debits. If there are any changes to the amount, date or frequency of your Direct Debit, the organisation will notify you at least 10 working days in advance.',
+      'If an error is made in the payment of your Direct Debit by the organisation or your bank, you are entitled to a full and immediate refund of the amount paid from your branch. You can cancel a Direct Debit at any time by simply contacting your bank or building society.',
+      'Please check all entries on your monthly statement carefully. If you notice any unrecognised card purchase, standing order, faster payment, or direct debit entry, contact our fraud and disputes team immediately quoting your 8-digit account number and sort code.',
+      'Important information about overdrafts, foreign exchange reference rates, contactless limits (£100.00 per transaction), strong customer authentication, and complaint escalation to the Financial Ombudsman Service (0800 023 4567) applies to this account.',
+      'Statements are produced electronically once per calendar month and retained in online banking for 7 years (84 monthly statements) for your tax and personal finance records.',
+    ].join('\n');
+
+    const monthDays = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    const buildMonthOcr = (monthIndex: number) => {
+      const mm = String(monthIndex + 1).padStart(2, '0');
+      const lastDay = String(monthDays[monthIndex]).padStart(2, '0');
+      const openBal = (2400 + monthIndex * 183.45).toFixed(2);
+      const debit1 = (118.2 + monthIndex * 6.35).toFixed(2);
+      const debit2 = (63.4 + monthIndex * 4.15).toFixed(2);
+      const closeBal = (2650 + monthIndex * 197.85).toFixed(2);
+      return [
+        staticHeader,
+        `Statement Period: 01/${mm}/2024 to ${lastDay}/${mm}/2024 | Statement Date: ${lastDay}/${mm}/2024`,
+        `Opening Balance Brought Forward: £${openBal}`,
+        `05/${mm}/2024 Direct Debit Octopus Energy £${debit1}`,
+        `18/${mm}/2024 Card Purchase Sainsburys Supermarket £${debit2}`,
+        `28/${mm}/2024 Faster Payment Monthly Salary Credit £4,250.00`,
+        `Closing Balance Carried Forward: £${closeBal}`,
+        staticFeeAndLegalBoilerplate,
+      ].join('\n');
+    };
+
+    // Use generic titles (no leading YYYY-MM) so content date/amount vetoes must do the work
+    const twelveMonths = Array.from({ length: 12 }, (_, m) =>
+      makeNote(`bank-2024-${m + 1}`, {
+        title: 'HSBC Consolidated Statement',
+        notebookTitle: 'Bank Statements',
+        notebookPath: 'Finance / Bank Statements / HSBC',
+        createdTime: 1_700_000_000_000 + m * 86_400_000 * 30,
         resources: [
           {
-            key: `stmt-${key}`,
+            key: `hsbc-2024-${m + 1}`,
             mime: 'application/pdf',
-            size,
-            ocrText: [
-              'NORTHERN TRUST RETAIL BANK PLC',
-              'Authorised by the Prudential Regulation Authority and regulated by the Financial Conduct Authority.',
-              'Account Holder: Jimmy Kwok | Sort Code: 20-00-00 | Account Number: 12345678',
-              'Registered Office: 1 Churchill Place, London E14 5HP. Customer helpline 0800 123 456.',
-              `Monthly Current Account Statement — Period: ${dateRange} (${month} 2024)`,
-              'Your deposits are protected by the Financial Services Compensation Scheme up to the statutory limit.',
-              'Important information about overdrafts, direct debits, standing orders, and foreign card fees applies to this account.',
-              ...txns,
-              `Closing Balance on statement date: £${balance}`,
-              'Please check your statement carefully and report any unrecognised transactions immediately.',
-            ].join('\n'),
+            size: 215_000 + (m % 4) * 1_500,
+            ocrText: buildMonthOcr(m),
+            filename: `statement_2024_${String(m + 1).padStart(2, '0')}.pdf`,
           },
         ],
-      });
-
-    const jan = makeStatement(
-      'stmt-jan',
-      'January',
-      '01/01/2024 to 31/01/2024',
-      ['04/01/2024 Direct Debit EnergyCo £142.50', '12/01/2024 Card Purchase Sainsburys £64.20', '28/01/2024 Salary Credit £4,250.00'],
-      '3,812.40',
-      182_000
-    );
-    const feb = makeStatement(
-      'stmt-feb',
-      'February',
-      '01/02/2024 to 29/02/2024',
-      ['05/02/2024 Direct Debit EnergyCo £158.90', '14/02/2024 Card Purchase Waitrose £81.15', '28/02/2024 Salary Credit £4,250.00'],
-      '4,109.75',
-      184_500
-    );
-    const marSameAmount = makeStatement(
-      'stmt-mar',
-      'March',
-      '01/03/2024 to 31/03/2024',
-      ['05/03/2024 Direct Debit EnergyCo £158.90', '14/03/2024 Card Purchase Waitrose £81.15', '28/03/2024 Salary Credit £4,250.00'],
-      '4,109.75',
-      184_500
+      })
     );
 
-    const clusters = detectDuplicateClusters([jan, feb, marSameAmount]);
-    assert.equal(clusters.length, 0);
+    assert.equal(
+      detectDuplicateClusters(twelveMonths).length,
+      0,
+      '12 monthly statements sharing 95% boilerplate and static numbers must yield no near cluster'
+    );
+
+    // Add an OCR-noisy rescan of November 2024 (index 10) with a different file size
+    const novOcr = buildMonthOcr(10)
+      .replace('Prudential Regulation Authority', 'Prudentia1 Regulation Authority')
+      .replace('Financial Ombudsman Service', 'Financia1 Ombudsman Service')
+      .replace('contactless limits', 'contact1ess limits');
+    const novRescan = makeNote('bank-2024-11-rescan', {
+      title: 'Scannable Document',
+      notebookTitle: 'Pending to sort',
+      notebookPath: 'Pending to sort',
+      createdTime: 1_735_000_000_000,
+      resources: [
+        {
+          key: 'hsbc-2024-11-rescan',
+          mime: 'application/pdf',
+          size: 238_000,
+          ocrText: novOcr,
+          filename: 'scan_nov_stmt.pdf',
+        },
+      ],
+    });
+
+    const withRescan = detectDuplicateClusters([...twelveMonths, novRescan]);
+    assert.equal(withRescan.length, 1, 'rescan of November statement should match only November');
+    assert.equal(withRescan[0].tier, 'near');
+    assert.equal(withRescan[0].suggestedKeeperId, twelveMonths[10].note.id);
+    assert.deepEqual(withRescan[0].noteIds, [twelveMonths[10].note.id, novRescan.note.id]);
+    assert.match(withRescan[0].evidence, /% same text/);
+    assert.match(withRescan[0].evidence, /same dates\/amounts/);
+  });
+
+  test('does not match template letters differing only in letter date and reference number', () => {
+    const buildLetter = (dateText: string, refNo: string) =>
+      [
+        'BARCLAYCARD CUSTOMER SERVICES',
+        'PO Box 5592, Northampton, NN4 1ZY | Helpline: 0800 151 0900 | Minicom: 0800 161 5300',
+        `Date: ${dateText}`,
+        `Application Reference: ${refNo}`,
+        'Dear Customer,',
+        'Thank you for submitting your recent Barclaycard Platinum Credit Card application online.',
+        'We have received your supporting identity and income verification documents and our underwriting team is reviewing your application.',
+        'Key Summary Box (Static Product Terms): Annual Card Fee £0.00 | Cash Advance Fee £3.00 minimum | Late Payment Fee £12.00 | Overlimit Fee £12.00 | Returned Payment Fee £12.00 | Representative Credit Limit £1,200.00 | Representative APR 24.90% variable.',
+        'You do not need to take any further action right now. We normally complete our review within 5 working days and will write to confirm our decision and your starting credit limit.',
+        'If you have any questions regarding your application, please quote your application reference number when contacting our UK customer service team between 08:00 and 20:00 Monday to Friday.',
+        'Yours sincerely, Barclaycard New Accounts & Underwriting Team.',
+      ].join('\n');
+
+    const letter2020 = makeNote('cc-ack-2020', {
+      title: 'Barclaycard Application Acknowledgement',
+      notebookTitle: 'Credit Cards',
+      createdTime: 1_606_608_000_000,
+      resources: [
+        {
+          key: 'cc-2020',
+          mime: 'application/pdf',
+          size: 142_000,
+          ocrText: buildLetter('29 November 2020', 'BC-2020-881203'),
+        },
+      ],
+    });
+    const letter2023a = makeNote('cc-ack-2023a', {
+      title: 'Barclaycard Application Acknowledgement',
+      notebookTitle: 'Credit Cards',
+      createdTime: 1_673_654_400_000,
+      resources: [
+        {
+          key: 'cc-2023a',
+          mime: 'application/pdf',
+          size: 144_200,
+          ocrText: buildLetter('14 January 2023', 'BC-2023-442910'),
+        },
+      ],
+    });
+    const letter2023b = makeNote('cc-ack-2023b', {
+      title: 'Barclaycard Application Acknowledgement',
+      notebookTitle: 'Credit Cards',
+      createdTime: 1_701_475_200_000,
+      resources: [
+        {
+          key: 'cc-2023b',
+          mime: 'application/pdf',
+          size: 143_100,
+          ocrText: buildLetter('02 December 2023', 'BC-2023-991042'),
+        },
+      ],
+    });
+
+    assert.equal(
+      detectDuplicateClusters([letter2020, letter2023a, letter2023b]).length,
+      0,
+      'template letters from different dates must not be grouped as near duplicates'
+    );
+
+    // Rescan of the 2023-01-14 letter with minor OCR noise still matches that exact letter
+    const letter2023aRescan = makeNote('cc-ack-2023a-rescan', {
+      title: 'Scan 0041',
+      notebookTitle: 'Pending to sort',
+      createdTime: 1_673_740_800_000,
+      resources: [
+        {
+          key: 'cc-2023a-rescan',
+          mime: 'application/pdf',
+          size: 151_000,
+          ocrText: buildLetter('14 January 2023', 'BC-2023-442910').replace('underwriting', 'underwrit1ng'),
+        },
+      ],
+    });
+
+    const clusters = detectDuplicateClusters([letter2020, letter2023a, letter2023b, letter2023aRescan]);
+    assert.equal(clusters.length, 1);
+    assert.equal(clusters[0].tier, 'near');
+    assert.deepEqual(clusters[0].noteIds, [letter2023a.note.id, letter2023aRescan.note.id]);
+    assert.match(clusters[0].evidence, /same dates\/amounts/);
+  });
+
+  test('extractNormalizedDates parses all supported date formats, handles DD/MM vs MM/DD consistently, and streams across chunk boundaries', () => {
+    const singleDateSamples: Array<[string, string[]]> = [
+      ['ISO hyphen 2024-11-30 end', ['2024-11-30']],
+      ['ISO slash 2024/11/30 end', ['2024-11-30']],
+      ['ISO dot 2024.11.30 end', ['2024-11-30']],
+      ['CJK 2024年11月30日 end', ['2024-11-30']],
+      ['Fullwidth CJK ２０２４年１１月３０日 end', ['2024-11-30']],
+      ['DMY slash 30/11/2024 end', ['2024-11-30']],
+      ['DMY hyphen 30-11-2024 end', ['2024-11-30']],
+      ['MDY slash 11/30/2024 end', ['2024-11-30']],
+      ['Short month DMY 30 Nov 2024 end', ['2024-11-30']],
+      ['Long month comma DMY 30 November, 2024 end', ['2024-11-30']],
+      ['Short month MDY Nov 30, 2024 end', ['2024-11-30']],
+      ['Long month MDY November 30 2024 end', ['2024-11-30']],
+      ['Ordinal month 30th Nov. 2024 and Sept 5th, 2024', ['2024-09-05', '2024-11-30']],
+      ['Ambiguous numeric 05/06/2024 emits both valid readings', ['2024-05-06', '2024-06-05']],
+      ['Symmetric numeric 06/06/2024 emits once', ['2024-06-06']],
+      ['Leap day 29/02/2024 valid, non-leap 29/02/2023 and 31/04/2024 ignored', ['2024-02-29']],
+    ];
+
+    for (const [sample, expected] of singleDateSamples) {
+      assert.deepEqual(
+        extractNormalizedDates(sample),
+        expected,
+        `unexpected extracted dates for ${JSON.stringify(sample)}`
+      );
+    }
+
+    // Multi-word date straddling the 16,384-char streaming chunk boundary must still be extracted
+    const pad = 'boiler '.repeat(2340); // 16,380 chars — "30 November, 2024" straddles the 16,384 boundary
+    const straddling = `${pad}30 November, 2024 and tail text`;
+    assert.deepEqual(extractNormalizedDates(straddling), ['2024-11-30']);
+
+    // Capped at 200 unique dates even when a huge text contains > 250 distinct dates
+    const manyDates = Array.from({ length: 260 }, (_, idx) => {
+      const year = 2000 + Math.floor(idx / 12);
+      const month = String((idx % 12) + 1).padStart(2, '0');
+      return `${year}-${month}-15`;
+    }).join(' ');
+    assert.equal(extractNormalizedDates(manyDates).length, 200);
+  });
+
+  test('amount veto rejects undated notes with >= 3 differing money amounts and streams past the 16 KB prefix', () => {
+    const sharedTail = Array.from({ length: 40 }, (_, i) => `clause${i} provision terms schedule standard`).join(' ');
+    const amtA = makeNote('amt-veto-a', {
+      title: 'Account Summary',
+      body: `Summary figures: opening £1,120.50, debit £45.80, transfer £310.25, closing £1,476.55. ${sharedTail}`,
+    });
+    const amtB = makeNote('amt-veto-b', {
+      title: 'Account Summary',
+      body: `Summary figures: opening £2,340.10, debit £89.40, transfer £612.75, closing £2,863.45. ${sharedTail}`,
+    });
+    assert.equal(detectDuplicateClusters([amtA, amtB]).length, 0, 'differing >= 3 amounts must veto near match');
+
+    // Dates or amounts appearing ONLY past the 16 KB near-duplicate prefix must still veto
+    const longPrefix = Array.from({ length: 1_500 }, (_, i) => `boilerplate${i % 250} paragraph`).join(' ');
+    assert.ok(longPrefix.length > 20_000, 'prefix fixture should exceed 16 KB');
+
+    const tailDateA = makeNote('tail-date-a', {
+      title: 'Annual Filing',
+      resources: [{ key: 'td-a', size: 220_000, ocrText: `${longPrefix} Signed and filed on 15 March 2023.` }],
+    });
+    const tailDateB = makeNote('tail-date-b', {
+      title: 'Annual Filing',
+      resources: [{ key: 'td-b', size: 222_000, ocrText: `${longPrefix} Signed and filed on 19 April 2024.` }],
+    });
+    assert.equal(
+      detectDuplicateClusters([tailDateA, tailDateB]).length,
+      0,
+      'full-text date veto must catch differing dates past the 16 KB prefix'
+    );
+
+    const tailAmtA = makeNote('tail-amt-a', {
+      title: 'Ledger Export',
+      resources: [
+        {
+          key: 'ta-a',
+          size: 220_000,
+          ocrText: `${longPrefix} Totals: £110.25, £220.50, £330.75, £661.50.`,
+        },
+      ],
+    });
+    const tailAmtB = makeNote('tail-amt-b', {
+      title: 'Ledger Export',
+      resources: [
+        {
+          key: 'ta-b',
+          size: 222_000,
+          ocrText: `${longPrefix} Totals: £410.15, £520.40, £630.85, £1,561.40.`,
+        },
+      ],
+    });
+    assert.equal(
+      detectDuplicateClusters([tailAmtA, tailAmtB]).length,
+      0,
+      'full-text amount veto must catch differing amounts past the 16 KB prefix'
+    );
+  });
+
+  test('title-date veto blocks conflicting leading title dates while allowing compatible prefixes and non-date titles', () => {
+    assert.equal(extractLeadingTitleDate('2023-02-04 Broker Statement'), '2023-02-04');
+    assert.equal(extractLeadingTitleDate('2023-02 Broker Statement'), '2023-02');
+    assert.equal(extractLeadingTitleDate('2023-02-31 Invalid Date'), '');
+    assert.equal(extractLeadingTitleDate('Scan 2023-02-04'), '');
+
+    assert.equal(titleDatesConflict('2023-02-04', '2023-02'), false);
+    assert.equal(titleDatesConflict('2023-02', '2023-02-04'), false);
+    assert.equal(titleDatesConflict('2023-02-04', '2023-02-04'), false);
+    assert.equal(titleDatesConflict('2023-02-04', ''), false);
+    assert.equal(titleDatesConflict('2022-10-11', '2022-11-10'), true);
+    assert.equal(titleDatesConflict('2023-02', '2023-03'), true);
+    assert.equal(titleDatesConflict('2023-02-04', '2023-02-05'), true);
+
+    const bodyBase =
+      'Brokerage portfolio confirmation covering equity holdings, custody disclosures, regulatory notices, dividend reinvestment elections, and account maintenance terms.';
+    const bodyNoisy = bodyBase.replace('reinvestment', 're1nvestment');
+
+    // Conflicting leading YYYY-MM-DD titles -> vetoed
+    const conflictA = makeNote('td-conf-a', { title: '2022-10-11 Broker Statement', body: bodyBase, createdTime: 1000 });
+    const conflictB = makeNote('td-conf-b', { title: '2022-11-10 Broker Statement', body: bodyNoisy, createdTime: 2000 });
+    assert.equal(detectDuplicateClusters([conflictA, conflictB]).length, 0);
+
+    // Compatible prefix (YYYY-MM-DD vs YYYY-MM) -> allowed
+    const compatA = makeNote('td-compat-a', { title: '2023-02-04 Broker Statement', body: bodyBase, createdTime: 1000 });
+    const compatB = makeNote('td-compat-b', { title: '2023-02 Broker Statement', body: bodyNoisy, createdTime: 2000 });
+    const compatClusters = detectDuplicateClusters([compatA, compatB]);
+    assert.equal(compatClusters.length, 1);
+    assert.equal(compatClusters[0].tier, 'near');
+
+    // Only one title starts with a date -> allowed
+    const oneDateA = makeNote('td-one-a', { title: '2023-02-04 Broker Statement', body: bodyBase, createdTime: 1000 });
+    const oneDateB = makeNote('td-one-b', { title: 'Scannable Document', body: bodyNoisy, createdTime: 2000 });
+    assert.equal(detectDuplicateClusters([oneDateA, oneDateB]).length, 1);
+
+    // Identical tier is unaffected by leading title dates (exact same content is still identical)
+    const identA = makeNote('td-ident-a', { title: '2022-10-11 Copy', body: bodyBase, createdTime: 1000 });
+    const identB = makeNote('td-ident-b', { title: '2022-11-10 Copy', body: bodyBase, createdTime: 2000 });
+    const identClusters = detectDuplicateClusters([identA, identB]);
+    assert.equal(identClusters.length, 1);
+    assert.equal(identClusters[0].tier, 'identical');
+  });
+
+  test('near-duplicate evidence only says "same dates/amounts" when full-text dates and amounts actually agree', () => {
+    // 1. Prose notes with integer numbers (ports/steps) but NO full dates or money amounts
+    const proseA = makeNote('ev-prose-a', {
+      title: 'Runbook A',
+      body: 'Deployment runbook step 1 verify port 8080, step 2 drain worker queue, step 3 run schema migration, step 4 verify health endpoint responds cleanly.',
+      createdTime: 1000,
+    });
+    const proseB = makeNote('ev-prose-b', {
+      title: 'Runbook B',
+      body: 'Deployment runbook step 1 verify port 8080, step 2 drain worker queue, step 3 run schema migration, step 4 verify health endpoint responds reliably.',
+      createdTime: 2000,
+    });
+    const proseClusters = detectDuplicateClusters([proseA, proseB]);
+    assert.equal(proseClusters.length, 1);
+    assert.equal(proseClusters[0].tier, 'near');
+    assert.match(proseClusters[0].evidence, /% same text/);
+    assert.doesNotMatch(proseClusters[0].evidence, /same dates\/amounts/);
+
+    // 2. Notes with matching date and 2 amounts where 1 amount differs (below 3-amount veto, so still near,
+    //    but evidence must NOT claim "same dates/amounts")
+    const partialShared = Array.from({ length: 30 }, (_, i) => `policyclause${i}`).join(' ');
+    const partialA = makeNote('ev-partial-a', {
+      title: 'Quote A',
+      body: `Insurance quote issued 15 October 2024 with static codes 101 202 303 404 505 606 707 808 909. Base £100.00, fee £20.00. ${partialShared}`,
+      createdTime: 1000,
+    });
+    const partialB = makeNote('ev-partial-b', {
+      title: 'Quote B',
+      body: `Insurance quote issued 15 October 2024 with static codes 101 202 303 404 505 606 707 808 909. Base £100.00, fee £25.00. ${partialShared}`,
+      createdTime: 2000,
+    });
+    const partialClusters = detectDuplicateClusters([partialA, partialB]);
+    assert.equal(partialClusters.length, 1);
+    assert.equal(partialClusters[0].tier, 'near');
+    assert.match(partialClusters[0].evidence, /% same text/);
+    assert.doesNotMatch(partialClusters[0].evidence, /same dates\/amounts/);
   });
 
   test('detects near-duplicate OCR scans with OCR noise when dates, amounts, and size agree', () => {
