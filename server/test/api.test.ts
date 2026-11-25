@@ -56,6 +56,58 @@ describe('auth', () => {
   });
 });
 
+describe('scan status', () => {
+  test('requires auth and is disabled by default', async () => {
+    assert.equal((await api('/api/scans', {}, false)).status, 401);
+    const res = await api('/api/scans');
+    assert.deepEqual(res.data, { enabled: false });
+  });
+
+  test('uses an injected bridge source for an allow-listed email', async () => {
+    const { createApp } = await import('../src/app.js');
+    const { config } = await import('../src/config.js');
+    const { ScanStatusService } = await import('../src/services/scan-status.js');
+    const injected = new ScanStatusService({
+      ocrServiceUrl: 'http://bridge.test',
+      scanStatusEmails: [DEMO_EMAIL],
+      source: async () => ({
+        ok: true,
+        cycle: { phase: 'ocr', running: true, ocrTotal: 2, ocrDone: 1 },
+        jobs: [
+          {
+            id: 'queued-demo',
+            name: 'receipt.pdf',
+            size: 42,
+            stage: 'queued',
+            receivedAt: new Date(Date.now() - 60_000).toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+        ],
+      }),
+    });
+    const server = createApp(config, { scanStatus: injected }).listen(0);
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const base = `http://127.0.0.1:${address.port}`;
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: DEMO_EMAIL, password: DEMO_PASSWORD }),
+    });
+    assert.equal(login.status, 200);
+    const loginBody = (await login.json()) as { sessionId: string };
+    const res = await fetch(`${base}/api/scans`, { headers: { Authorization: `Bearer ${loginBody.sessionId}` } });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { enabled: boolean; active: number; jobs: Array<{ queuePosition: number }> };
+    assert.equal(body.enabled, true);
+    assert.equal(body.active, 1);
+    assert.equal(body.jobs[0].queuePosition, 1);
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+});
+
 describe('reading', () => {
   test('builds the nested notebook tree across paginated listings', async () => {
     const res = await api('/api/notebooks');
