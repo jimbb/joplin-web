@@ -145,6 +145,14 @@ export interface OrganizerDeps {
   maxRetries?: number;
 }
 
+interface StartJobInput {
+  noteIds?: unknown;
+  sourceNotebookIds?: unknown;
+  includeSubNotebooks?: unknown;
+  excludeNotebookIds?: unknown;
+  mode?: unknown;
+}
+
 interface InternalJobItem extends OrganizeJobItem {
   systemRetryCount?: number;
 }
@@ -1874,6 +1882,94 @@ export class OrganizerService {
     });
   }
 
+  private resolveStartNoteIds(entry: CacheEntry, input: StartJobInput, allowEmpty = false): string[] {
+    const hasNoteIds = input.noteIds !== undefined;
+    const hasSourceScope = input.sourceNotebookIds !== undefined;
+    if (hasNoteIds === hasSourceScope) {
+      throw new OrganizeValidationError('Provide exactly one of noteIds or sourceNotebookIds');
+    }
+    const noteIds: string[] = [];
+    const seen = new Set<string>();
+    if (hasNoteIds) {
+      if (!Array.isArray(input.noteIds) || input.noteIds.length === 0) {
+        throw new OrganizeValidationError('noteIds must be a non-empty array');
+      }
+      if (input.noteIds.length > MAX_ORGANIZE_NOTES) {
+        throw new OrganizeValidationError(`Cannot auto-organize more than ${MAX_ORGANIZE_NOTES} notes per job`);
+      }
+      for (const rawId of input.noteIds) {
+        if (typeof rawId !== 'string') throw new OrganizeValidationError('noteIds must contain strings only');
+        assertValidId(rawId, 'note id');
+        if (!seen.has(rawId)) {
+          seen.add(rawId);
+          noteIds.push(rawId);
+        }
+      }
+      return noteIds;
+    }
+
+    if (!Array.isArray(input.sourceNotebookIds) || !input.sourceNotebookIds.every((id) => typeof id === 'string')) {
+      throw new OrganizeValidationError('sourceNotebookIds must be an array of notebook ids');
+    }
+    if (input.sourceNotebookIds.length > MAX_EXCLUDED_NOTEBOOKS) {
+      throw new OrganizeValidationError(`Cannot select more than ${MAX_EXCLUDED_NOTEBOOKS} source notebooks`);
+    }
+    const sourceIds = new Set<string>();
+    for (const rawId of input.sourceNotebookIds) {
+      assertValidId(rawId, 'notebook id');
+      if (!entry.notebooks.has(rawId)) throw new OrganizeValidationError(`Notebook not found: ${rawId}`);
+      sourceIds.add(rawId);
+    }
+    const selected = new Set<string>(sourceIds);
+    if (input.includeSubNotebooks !== false && sourceIds.size > 0) {
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const notebook of entry.notebooks.values()) {
+          if (notebook.parentId && selected.has(notebook.parentId) && !selected.has(notebook.id)) {
+            selected.add(notebook.id);
+            changed = true;
+          }
+        }
+      }
+    }
+    for (const note of entry.notes.values()) {
+      if (
+        (sourceIds.size === 0 || (note.parentId && selected.has(note.parentId))) &&
+        note.deletedTime === 0 &&
+        note.parentId &&
+        !isNotebookTrashed(entry, note.parentId) &&
+        !isConflictNote(note) &&
+        note.properties.encryption_applied !== '1'
+      ) {
+        noteIds.push(note.id);
+      }
+    }
+    if (noteIds.length > MAX_ORGANIZE_NOTES) {
+      throw new OrganizeValidationError(`Scope matched ${noteIds.length} notes, exceeding the maximum of ${MAX_ORGANIZE_NOTES}`);
+    }
+    if (noteIds.length === 0 && !allowEmpty) throw new OrganizeValidationError('The selected scope contains no active notes');
+    return noteIds;
+  }
+
+  /** Counts the active notes a start request would match without creating a job or calling the AI provider. */
+  public async countJob(sessionId: string, input: StartJobInput): Promise<{ matched: number }> {
+    if (!this.isEnabled()) throw new OrganizeValidationError('Auto-organize is not configured on this server', 503);
+    if (input.includeSubNotebooks !== undefined && typeof input.includeSubNotebooks !== 'boolean') {
+      throw new OrganizeValidationError('includeSubNotebooks must be a boolean');
+    }
+    if (input.mode !== undefined && input.mode !== 'organize' && input.mode !== 'retitle') {
+      throw new OrganizeValidationError('mode must be organize or retitle');
+    }
+    const entry = await noteCache.ensureFresh(sessionId, 'stale-ok');
+    const ids = this.resolveStartNoteIds(entry, input, true);
+    const matched = ids.filter((id) => {
+      const note = entry.notes.get(id);
+      return Boolean(note && note.deletedTime === 0 && note.parentId && !isNotebookTrashed(entry, note.parentId) && !isConflictNote(note) && note.properties.encryption_applied !== '1');
+    }).length;
+    return { matched };
+  }
+
   private findRunningJobId(ownerKey: string, state: OwnerJobState, excludeJobId?: string): string | null {
     const activeId = this.activeRunningJobIds.get(ownerKey);
     if (activeId && activeId !== excludeJobId) return activeId;
@@ -1935,14 +2031,15 @@ export class OrganizerService {
       },
     ];
     const completion = this.getCompletionClient();
-    const first = await completion(messages, new AbortController().signal);
+    const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+    const first = await completion(messages, timeoutSignal);
     let parsed = parseAndValidateRetitleSuggestion(first.content, { currentTitle: note.title });
     if (!parsed.ok) {
       const repair = await completion([
         ...messages,
         { role: 'assistant', content: first.content },
         { role: 'user', content: `Your previous response was invalid (${parsed.error}). Reply ONLY with { "title": string, "confidence": number, "reason": string }.` },
-      ], new AbortController().signal);
+      ], timeoutSignal);
       parsed = parseAndValidateRetitleSuggestion(repair.content, { currentTitle: note.title });
     }
     if (!parsed.ok) throw new OrganizeValidationError('Model returned invalid title suggestion', 502);
@@ -1955,44 +2052,24 @@ export class OrganizerService {
    */
   public async startJob(
     sessionId: string,
-    input: {
-      noteIds?: unknown;
-      sourceNotebookIds?: unknown;
-      includeSubNotebooks?: unknown;
-      excludeNotebookIds?: unknown;
-      mode?: unknown;
-    }
+    input: StartJobInput
   ): Promise<{ jobId: string }> {
     if (!this.isEnabled()) {
       throw new OrganizeValidationError('Auto-organize is not configured on this server', 503);
     }
     const ownerKey = this.attachSession(sessionId);
 
-    const hasNoteIds = input.noteIds !== undefined;
-    const hasSourceScope = input.sourceNotebookIds !== undefined;
-    if (hasNoteIds === hasSourceScope) {
-      throw new OrganizeValidationError('Provide exactly one of noteIds or sourceNotebookIds');
+    let mode: OrganizeJobMode = 'organize';
+    if (input.mode !== undefined) {
+      if (input.mode !== 'organize' && input.mode !== 'retitle') {
+        throw new OrganizeValidationError('mode must be organize or retitle');
+      }
+      mode = input.mode;
     }
-    const mode: OrganizeJobMode = input.mode === undefined ? 'organize' : input.mode === 'retitle' ? 'retitle' : input.mode === 'organize' ? 'organize' : (() => { throw new OrganizeValidationError('mode must be organize or retitle'); })();
     if (input.includeSubNotebooks !== undefined && typeof input.includeSubNotebooks !== 'boolean') {
       throw new OrganizeValidationError('includeSubNotebooks must be a boolean');
     }
-    const includeSubNotebooks = input.includeSubNotebooks !== false;
-    const uniqueNoteIds: string[] = [];
-    const seenNoteIds = new Set<string>();
-    if (hasNoteIds) {
-      if (!Array.isArray(input.noteIds) || input.noteIds.length === 0) {
-        throw new OrganizeValidationError('noteIds must be a non-empty array');
-      }
-      if (input.noteIds.length > MAX_ORGANIZE_NOTES) {
-        throw new OrganizeValidationError(`Cannot auto-organize more than ${MAX_ORGANIZE_NOTES} notes per job`);
-      }
-      for (const rawId of input.noteIds) {
-        if (typeof rawId !== 'string') throw new OrganizeValidationError('noteIds must contain strings only');
-        assertValidId(rawId, 'note id');
-        if (!seenNoteIds.has(rawId)) { seenNoteIds.add(rawId); uniqueNoteIds.push(rawId); }
-      }
-    }
+    let uniqueNoteIds: string[];
 
     const excludeSet = new Set<string>();
     if (input.excludeNotebookIds !== undefined) {
@@ -2022,43 +2099,8 @@ export class OrganizerService {
     }
 
     const entry = await noteCache.ensureFresh(sessionId, 'stale-ok');
-    if (hasSourceScope) {
-      if (!Array.isArray(input.sourceNotebookIds) || !input.sourceNotebookIds.every((id) => typeof id === 'string')) {
-        throw new OrganizeValidationError('sourceNotebookIds must be an array of notebook ids');
-      }
-      if (input.sourceNotebookIds.length > MAX_EXCLUDED_NOTEBOOKS) {
-        throw new OrganizeValidationError(`Cannot select more than ${MAX_EXCLUDED_NOTEBOOKS} source notebooks`);
-      }
-      const sourceIds = new Set<string>();
-      for (const rawId of input.sourceNotebookIds) {
-        assertValidId(rawId, 'notebook id');
-        if (!entry.notebooks.has(rawId)) throw new OrganizeValidationError(`Notebook not found: ${rawId}`);
-        sourceIds.add(rawId);
-      }
-      const selected = new Set<string>(sourceIds);
-      if (includeSubNotebooks && sourceIds.size > 0) {
-        let changed = true;
-        while (changed) {
-          changed = false;
-          for (const notebook of entry.notebooks.values()) {
-            if (notebook.parentId && selected.has(notebook.parentId) && !selected.has(notebook.id)) {
-              selected.add(notebook.id);
-              changed = true;
-            }
-          }
-        }
-      }
-      for (const note of entry.notes.values()) {
-        if ((sourceIds.size === 0 || (note.parentId && selected.has(note.parentId))) && note.deletedTime === 0 && note.parentId && !isNotebookTrashed(entry, note.parentId) && !isConflictNote(note) && note.properties.encryption_applied !== '1') {
-          seenNoteIds.add(note.id);
-          uniqueNoteIds.push(note.id);
-        }
-      }
-      if (uniqueNoteIds.length > MAX_ORGANIZE_NOTES) {
-        throw new OrganizeValidationError(`Scope matched ${uniqueNoteIds.length} notes, exceeding the maximum of ${MAX_ORGANIZE_NOTES}`);
-      }
-      if (uniqueNoteIds.length === 0) throw new OrganizeValidationError('The selected scope contains no active notes');
-    }
+    uniqueNoteIds = this.resolveStartNoteIds(entry, input);
+    const seenNoteIds = new Set(uniqueNoteIds);
     // A second request (double click, other tab) may have started a job while the cache refreshed.
     const startedMeanwhile = this.findRunningJobId(ownerKey, state);
     if (startedMeanwhile) {

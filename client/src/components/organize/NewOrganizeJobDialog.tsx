@@ -10,10 +10,12 @@ interface NewOrganizeJobDialogProps {
   onOpenChange: (open: boolean) => void;
   notebooks: Notebook[];
   isPending?: boolean;
-  onConfirm: (input: { sourceNotebookIds?: string[]; mode: OrganizeJobMode; includeSubNotebooks: boolean }) => void;
+  matched?: number;
+  onConfirm: (input: { sourceNotebookIds?: string[]; mode: OrganizeJobMode; includeSubNotebooks: boolean }) => void | Promise<void>;
 }
 
-export function NewOrganizeJobDialog({ open, onOpenChange, notebooks, isPending = false, onConfirm }: NewOrganizeJobDialogProps) {
+/** Picks a source scope and AI mode before the disclosure/exclusion confirmation. */
+export function NewOrganizeJobDialog({ open, onOpenChange, notebooks, isPending = false, matched, onConfirm }: NewOrganizeJobDialogProps) {
   const [sourceIds, setSourceIds] = useState<Set<string>>(new Set());
   const [allNotes, setAllNotes] = useState(true);
   const [includeSubNotebooks, setIncludeSubNotebooks] = useState(true);
@@ -55,6 +57,7 @@ export function NewOrganizeJobDialog({ open, onOpenChange, notebooks, isPending 
             </div>
             {!allNotes && <label className="flex items-center gap-2 text-xs text-muted-foreground"><input type="checkbox" checked={includeSubNotebooks} onChange={(event) => setIncludeSubNotebooks(event.target.checked)} /> Include sub-notebooks</label>}
           </div>
+          {matched !== undefined && <p className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-sm text-foreground"><strong>{matched.toLocaleString()}</strong> notes matched this scope.</p>}
           <div className="space-y-2">
             <p className="text-xs font-medium text-foreground">Job mode</p>
             <label className="flex items-center gap-2 text-sm"><input type="radio" checked={mode === "organize"} onChange={() => setMode("organize")} /> Organize (title, notebook, tags)</label>
@@ -63,7 +66,7 @@ export function NewOrganizeJobDialog({ open, onOpenChange, notebooks, isPending 
         </div>
         <DialogFooter>
           <Button type="button" variant="ghost" disabled={isPending} onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button type="button" disabled={isPending || (!allNotes && sourceIds.size === 0)} onClick={submit}>{isPending && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}Start job</Button>
+          <Button type="button" disabled={isPending || (!allNotes && sourceIds.size === 0)} onClick={submit}>{isPending && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}{matched === undefined ? "Check scope" : "Continue"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -922,6 +922,19 @@ export async function createOrganizeJob(payload: {
   });
 }
 
+/** Counts the active notes matched by a scope without creating a job. */
+export async function previewOrganizeJob(payload: {
+  noteIds?: string[];
+  sourceNotebookIds?: string[];
+  includeSubNotebooks?: boolean;
+  mode?: OrganizeJobMode;
+}): Promise<{ matched: number }> {
+  return request<{ matched: number }>("/api/organize/jobs", {
+    method: "POST",
+    body: JSON.stringify({ ...payload, dryRun: true }),
+  });
+}
+
 export async function suggestNoteTitle(noteId: string): Promise<{ title: string }> {
   return request<{ title: string }>("/api/organize/retitle", {
     method: "POST",

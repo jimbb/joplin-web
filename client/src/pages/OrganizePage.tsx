@@ -24,6 +24,7 @@ import { Sidebar } from "@/components/layout/Sidebar";
 import { NotebookPicker } from "@/components/notebooks/NotebookPicker";
 import { TagAutocompleteInput } from "@/components/tags/TagAutocompleteInput";
 import { NewOrganizeJobDialog } from "@/components/organize/NewOrganizeJobDialog";
+import { StartOrganizeDialog } from "@/components/organize/StartOrganizeDialog";
 import { ConfirmDialog } from "@/components/common/Dialogs";
 import { QueryError } from "@/components/common/QueryError";
 import { Badge } from "@/components/ui/badge";
@@ -50,7 +51,7 @@ import {
   useRetryOrganizeJob,
   useUndoOrganizeJob,
 } from "@/hooks/use-organize";
-import { getOrganizeTargets } from "@/lib/api";
+import { getOrganizeRunningJobId, getOrganizeTargets, previewOrganizeJob } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/format";
 import { buildNotebookPathMap } from "@/lib/notebooks";
 import {
@@ -78,6 +79,13 @@ interface RowEdit {
   title?: string;
   notebookId?: string;
   tags?: string[];
+}
+
+interface NewJobScope {
+  sourceNotebookIds: string[];
+  includeSubNotebooks: boolean;
+  mode: "organize" | "retitle";
+  matched: number;
 }
 
 function noteUrlForItem(item: OrganizeJobItem): string {
@@ -128,6 +136,8 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
   const [tagDraft, setTagDraft] = useState("");
   const [jobToDelete, setJobToDelete] = useState<OrganizeJobSummary | null>(null);
   const [newJobOpen, setNewJobOpen] = useState(false);
+  const [newJobScope, setNewJobScope] = useState<NewJobScope | null>(null);
+  const [newJobConflict, setNewJobConflict] = useState<{ runningJobId: string; message: string } | null>(null);
   const seenItemsRef = useRef<Map<string, OrganizeJobItem>>(new Map());
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
@@ -150,19 +160,50 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
   const cancelMutation = useCancelOrganizeJob(jobId);
   const deleteMutation = useDeleteOrganizeJob();
   const createMutation = useCreateOrganizeJob();
+  const cancelRunningMutation = useCancelOrganizeJob();
   const retryMutation = useRetryOrganizeJob(jobId);
   const applyMutation = useApplyOrganizeJob(jobId);
   const undoMutation = useUndoOrganizeJob(jobId);
   const isMutating = isPreparingApply || applyMutation.isPending || undoMutation.isPending;
 
-  const startNewJob = async (input: { sourceNotebookIds?: string[]; mode: "organize" | "retitle"; includeSubNotebooks: boolean }) => {
+  const previewNewJob = async (input: { sourceNotebookIds?: string[]; mode: "organize" | "retitle"; includeSubNotebooks: boolean }) => {
     try {
-      const result = await createMutation.mutateAsync({ ...input, ...(input.sourceNotebookIds ? {} : { noteIds: undefined }) });
+      const sourceNotebookIds = input.sourceNotebookIds ?? [];
+      const result = await previewOrganizeJob({ sourceNotebookIds, includeSubNotebooks: input.includeSubNotebooks, mode: input.mode });
       setNewJobOpen(false);
+      setNewJobConflict(null);
+      setNewJobScope({ ...input, sourceNotebookIds, matched: result.matched });
+    } catch (err) {
+      toast.error("Could not check AI job scope", { description: err instanceof Error ? err.message : undefined });
+    }
+  };
+
+  const startNewJob = async (excludeNotebookIds: string[]) => {
+    if (!newJobScope) return;
+    try {
+      const result = await createMutation.mutateAsync({
+        sourceNotebookIds: newJobScope.sourceNotebookIds,
+        includeSubNotebooks: newJobScope.includeSubNotebooks,
+        mode: newJobScope.mode,
+        ...(newJobScope.mode === "organize" ? { excludeNotebookIds } : {}),
+      });
+      setNewJobScope(null);
+      setNewJobConflict(null);
       navigate(`/organize/${result.jobId}`);
     } catch (err) {
+      const runningJobId = getOrganizeRunningJobId(err);
+      if (runningJobId) {
+        setNewJobConflict({ runningJobId, message: err instanceof Error ? err.message : "Another AI job is currently running." });
+        return;
+      }
       toast.error("Could not start AI job", { description: err instanceof Error ? err.message : undefined });
     }
+  };
+
+  const cancelAndStartNewJob = async (runningJobId: string, excludeNotebookIds: string[]) => {
+    await cancelRunningMutation.mutateAsync(runningJobId);
+    setNewJobConflict(null);
+    await startNewJob(excludeNotebookIds);
   };
 
   const notebookPathById = useMemo(() => buildNotebookPathMap(notebooks), [notebooks]);
@@ -1129,7 +1170,40 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
             isPending={deleteMutation.isPending}
             onConfirm={() => void handleDeleteJob()}
           />
-          <NewOrganizeJobDialog open={newJobOpen} onOpenChange={setNewJobOpen} notebooks={notebooks ?? []} isPending={createMutation.isPending} onConfirm={(input) => void startNewJob(input)} />
+          <NewOrganizeJobDialog
+            open={newJobOpen}
+            onOpenChange={setNewJobOpen}
+            notebooks={notebooks ?? []}
+            isPending={false}
+            onConfirm={(input) => void previewNewJob(input)}
+          />
+          <StartOrganizeDialog
+            open={Boolean(newJobScope)}
+            onOpenChange={(open) => {
+              if (!open && !createMutation.isPending && !cancelRunningMutation.isPending) {
+                setNewJobScope(null);
+                setNewJobConflict(null);
+              }
+            }}
+            selectedCount={newJobScope?.matched ?? 0}
+            notebooks={notebooks ?? []}
+            mode={newJobScope?.mode}
+            isPending={createMutation.isPending || cancelRunningMutation.isPending}
+            previousJobsCount={organizeJobs.length}
+            runningJob={organizeJobs.find((summary) => summary.status === "running") ?? null}
+            conflictRunningJobId={newJobConflict?.runningJobId ?? null}
+            conflictMessage={newJobConflict?.message ?? null}
+            onViewJobs={() => {
+              setNewJobScope(null);
+              navigate("/organize");
+            }}
+            onViewRunningJob={(runningJobId) => {
+              setNewJobScope(null);
+              navigate(`/organize/${runningJobId}`);
+            }}
+            onCancelAndStart={(runningJobId, excludeNotebookIds) => void cancelAndStartNewJob(runningJobId, excludeNotebookIds)}
+            onConfirm={(excludeNotebookIds) => void startNewJob(excludeNotebookIds)}
+          />
         </div>
       ) : (
       <div className="flex h-full w-full flex-col overflow-hidden bg-background">

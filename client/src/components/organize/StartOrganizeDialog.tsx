@@ -155,7 +155,7 @@ export function StartOrganizeDialog({
             </div>
           )}
 
-          <div className="space-y-2">
+          {mode === "organize" && <div className="space-y-2">
             <div className="flex items-center justify-between gap-2">
               {mode === "organize" && <span className="text-xs font-medium text-foreground">Exclude target notebooks</span>}
               <span className="text-[11px] text-muted-foreground font-mono">
@@ -210,7 +210,7 @@ export function StartOrganizeDialog({
                 </p>
               )}
             </div>}
-          </div>
+          </div>}
 
           <div
             role="note"

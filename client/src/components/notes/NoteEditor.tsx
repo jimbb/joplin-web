@@ -73,6 +73,7 @@ function loadMode(): EditorMode {
 
 interface NoteEditorProps {
   note: Note;
+  readOnly?: boolean;
   /** Focus the title instead of the body (used for freshly created notes) */
   focusTitle?: boolean;
   /** Start from a draft restored from this device instead of the server text */
@@ -90,7 +91,7 @@ const escapeVoiceHtml = (text: string) =>
  * Initialised once from `note`; later updates to the prop are ignored so typing is never reset.
  * Unsaved text is mirrored to localStorage (see lib/drafts) until the server has it.
  */
-export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDone }: NoteEditorProps) {
+export function NoteEditor({ note, readOnly = false, focusTitle = false, initialDraft = null, onDone }: NoteEditorProps) {
   const queryClient = useQueryClient();
   // Split view needs the width of the lg breakpoint; below it (phones, three panes on tablets) it acts as Edit
   const noRoomForSplit = useIsMobile(1024);
@@ -659,7 +660,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
               effectiveMode !== "split" && "max-w-4xl"
             )}
           />
-          {organizeStatus?.enabled && !note.encrypted && (
+          {organizeStatus?.enabled && !readOnly && !note.encrypted && (
             <Button
               type="button"
               variant="ghost"

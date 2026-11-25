@@ -55,14 +55,20 @@ export function createOrganizeRouter(service: OrganizerService = organizerServic
       res.status(400).json({ error: 'Request body must be a JSON object' });
       return;
     }
-    const { noteIds, sourceNotebookIds, includeSubNotebooks, excludeNotebookIds, mode } = req.body as {
+    const { noteIds, sourceNotebookIds, includeSubNotebooks, excludeNotebookIds, mode, dryRun } = req.body as {
       noteIds?: unknown;
       sourceNotebookIds?: unknown;
       includeSubNotebooks?: unknown;
       excludeNotebookIds?: unknown;
       mode?: unknown;
+      dryRun?: unknown;
     };
-    const result = await service.startJob(req.sessionId!, { noteIds, sourceNotebookIds, includeSubNotebooks, excludeNotebookIds, mode });
+    const input = { noteIds, sourceNotebookIds, includeSubNotebooks, excludeNotebookIds, mode };
+    if (dryRun === true) {
+      res.status(200).json(await service.countJob(req.sessionId!, input));
+      return;
+    }
+    const result = await service.startJob(req.sessionId!, input);
     res.status(201).json(result);
   });
 
