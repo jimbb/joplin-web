@@ -42,13 +42,17 @@ const note: Note = {
 const REFUSAL = "This account uses end-to-end encryption. Joplin Web cannot encrypt data, so it is read-only here";
 
 let calls: FetchCall[];
+let aiEnabled = false;
 
 beforeEach(() => {
+  aiEnabled = false;
   localStorage.clear();
   resetConnection();
   setDraftOwner(draftOwner("me@example.com", "notes.example.com"));
   calls = mockFetch(({ method, path }) => {
     if (method === "PUT" && path === `/api/notes/${NOTE_ID}`) return jsonResponse({ error: REFUSAL, status: 422 }, 422);
+    if (path === "/api/organize/status") return jsonResponse({ enabled: aiEnabled, model: "fake" });
+    if (method === "POST" && path === "/api/organize/retitle") return jsonResponse({ title: "2025-01-01 Acme – Invoice" });
     if (path === "/api/account/write-state") return jsonResponse({ writable: false, reason: REFUSAL });
     return undefined;
   });
@@ -81,5 +85,45 @@ describe("NoteEditor save refused as read-only (422)", () => {
     expect(calls.filter((c) => c.method === "PUT")).toHaveLength(1);
     // The account may have turned read-only elsewhere: the write state is asked again
     await waitFor(() => expect(queryClient.getQueryState(WRITE_STATE_QUERY_KEY)?.isInvalidated).toBe(true));
+  });
+});
+
+describe("NoteEditor title suggestions", () => {
+  function renderEditor(options: { readOnly?: boolean; encrypted?: boolean } = {}) {
+    const queryClient = new QueryClient();
+    const target = { ...note, ...(options.encrypted ? { encrypted: true } : {}) };
+    return render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <NoteEditor note={target} readOnly={options.readOnly} onDone={vi.fn()} />
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+  }
+
+  it("hides Suggest title when AI is off, read-only, or encrypted", async () => {
+    renderEditor();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Suggest title" })).toBeNull());
+    cleanup();
+    aiEnabled = true;
+    renderEditor({ readOnly: true });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Suggest title" })).toBeNull());
+    cleanup();
+    renderEditor({ encrypted: true });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Suggest title" })).toBeNull());
+  });
+
+  it("accepts a suggested title and dismisses another suggestion", async () => {
+    aiEnabled = true;
+    renderEditor();
+    fireEvent.click(await screen.findByRole("button", { name: "Suggest title" }));
+    expect(await screen.findByText("2025-01-01 Acme – Invoice")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Accept" }));
+    expect((screen.getByLabelText("Note title") as HTMLInputElement).value).toBe("2025-01-01 Acme – Invoice");
+
+    fireEvent.click(screen.getByRole("button", { name: "Suggest title" }));
+    await screen.findByText("2025-01-01 Acme – Invoice");
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByText("Suggested title")).toBeNull();
   });
 });

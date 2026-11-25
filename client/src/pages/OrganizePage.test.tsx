@@ -128,6 +128,47 @@ afterEach(() => {
 });
 
 describe("OrganizePage", () => {
+  it("renders a retitle review without notebook, tag, or moves controls", async () => {
+    const job = makeJob({
+      mode: "retitle",
+      progress: { total: 1, done: 1, failed: 0 },
+      totalItems: 1,
+      items: [
+        {
+          noteId: id("d"),
+          currentTitle: "scan.pdf",
+          currentNotebookId: id("1"),
+          currentNotebookPath: "Pending to sort",
+          updatedTime: 1001,
+          status: "done",
+          suggestion: {
+            title: "2025-01-01 Acme – Invoice",
+            notebookId: "",
+            tags: [],
+            confidence: 0.9,
+            documentDate: "2025-01-01",
+            reason: "OCR identified an invoice.",
+          },
+        },
+      ],
+    });
+    mockFetch((call) => {
+      const url = new URL(call.path, "http://localhost");
+      if (url.pathname === "/api/notebooks") return jsonResponse(notebooks);
+      if (url.pathname === "/api/tags") return jsonResponse(tags);
+      if (url.pathname === `/api/organize/jobs/${job.id}`) return jsonResponse(job);
+      if (url.pathname === "/api/organize/jobs") return jsonResponse({ jobs: [] });
+      return undefined;
+    });
+    renderOrganizePage();
+    expect(await screen.findByRole("table", { name: "Organize suggestions" })).toBeTruthy();
+    const table = screen.getByRole("table", { name: "Organize suggestions" });
+    expect(within(table).queryByText("Notebook")).toBeNull();
+    expect(within(table).queryByText("Tags")).toBeNull();
+    expect(within(table).queryByText(/Changes notebook/)).toBeNull();
+    expect(screen.getByDisplayValue("2025-01-01 Acme – Invoice")).toBeTruthy();
+  });
+
   it("renders suggestions table, defaults low-confidence unticked, supports inline editing, filters, apply and undo", async () => {
     const successSpy = vi.spyOn(toast, "success").mockReturnValue("t1");
     const warningSpy = vi.spyOn(toast, "warning").mockReturnValue("t2");
