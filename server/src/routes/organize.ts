@@ -1,11 +1,60 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import { noteCache } from '../services/note-cache.js';
+import { assertValidId, noteWriter, WriteValidationError } from '../services/note-writer.js';
 import { organizerService, OrganizerService } from '../services/organizer.js';
-import type { OrganizeFilter } from '../types/index.js';
+import type { DuplicateTier, OrganizeFilter } from '../types/index.js';
 import { isTrueFlag } from './query.js';
 
 const VALID_ORGANIZE_FILTERS = new Set<OrganizeFilter>(['all', 'very-high', 'high', 'moves']);
+const VALID_DUPLICATE_TIERS = new Set<DuplicateTier>(['identical', 'near']);
+
+function parseDismissPairs(body: unknown): Array<[string, string]> {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new WriteValidationError('Request body must be a JSON object', 400);
+  }
+  const { pairs, noteIds } = body as { pairs?: unknown; noteIds?: unknown };
+  const result: Array<[string, string]> = [];
+
+  if (Array.isArray(pairs)) {
+    for (const entry of pairs) {
+      if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string' || typeof entry[1] !== 'string') {
+        throw new WriteValidationError('pairs must be an array of [noteIdA, noteIdB] tuples', 400);
+      }
+      const a = assertValidId(entry[0], 'note id');
+      const b = assertValidId(entry[1], 'note id');
+      if (a === b) throw new WriteValidationError('Duplicate pair must contain two distinct note ids', 400);
+      result.push([a, b]);
+    }
+  } else if (Array.isArray(noteIds)) {
+    const cleanIds = Array.from(
+      new Set(
+        noteIds.map((id) => {
+          if (typeof id !== 'string') throw new WriteValidationError('noteIds must contain strings only', 400);
+          return assertValidId(id, 'note id');
+        })
+      )
+    );
+    if (cleanIds.length < 2) {
+      throw new WriteValidationError('noteIds must contain at least 2 distinct note ids', 400);
+    }
+    if (cleanIds.length > 50) {
+      throw new WriteValidationError('Too many noteIds in a single dismiss request', 400);
+    }
+    for (let i = 0; i < cleanIds.length; i++) {
+      for (let j = i + 1; j < cleanIds.length; j++) {
+        result.push([cleanIds[i], cleanIds[j]]);
+      }
+    }
+  } else {
+    throw new WriteValidationError('Expected pairs or noteIds in request body', 400);
+  }
+
+  if (result.length === 0) {
+    throw new WriteValidationError('At least one note pair is required', 400);
+  }
+  return result;
+}
 
 export function createOrganizeRouter(service: OrganizerService = organizerService): Router {
   const router = Router();
@@ -22,12 +71,200 @@ export function createOrganizeRouter(service: OrganizerService = organizerServic
   });
 
   /**
-   * GET /api/organize/hygiene
-   * Detects duplicate clusters, empty notes, and untagged notes locally without calling the LLM.
+   * GET /api/organize/hygiene?tier=identical|near&offset=0&limit=50
+   * Detects content-based duplicate clusters, empty notes, and untagged notes locally without calling the LLM.
    */
   router.get('/hygiene', async (req, res) => {
-    const report = await noteCache.getHygieneReport(req.sessionId!);
+    const rawTier = req.query.tier;
+    let tier: DuplicateTier | undefined;
+    if (rawTier !== undefined && rawTier !== '') {
+      if (typeof rawTier !== 'string' || !VALID_DUPLICATE_TIERS.has(rawTier as DuplicateTier)) {
+        res.status(400).json({ error: 'tier must be identical or near' });
+        return;
+      }
+      tier = rawTier as DuplicateTier;
+    }
+
+    const rawOffset = req.query.offset;
+    const rawLimit = req.query.limit;
+    let offset: number | undefined;
+    let limit: number | undefined;
+    if (rawOffset !== undefined && rawOffset !== '') {
+      const parsed = Number(rawOffset);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        res.status(400).json({ error: 'offset must be a non-negative integer' });
+        return;
+      }
+      offset = Math.floor(parsed);
+    }
+    if (rawLimit !== undefined && rawLimit !== '') {
+      const parsed = Number(rawLimit);
+      if (!Number.isFinite(parsed) || parsed < 1) {
+        res.status(400).json({ error: 'limit must be a positive integer' });
+        return;
+      }
+      limit = Math.floor(parsed);
+    }
+
+    let dismissedPairs: Set<string> | undefined;
+    if (req.preferencesStore) {
+      const ownerKey = noteCache.getOwnerKey(req.sessionId!);
+      const prefs = req.preferencesStore.get(ownerKey);
+      if (prefs.dismissedDuplicatePairs.length > 0) {
+        dismissedPairs = new Set(prefs.dismissedDuplicatePairs);
+      }
+    }
+
+    const report = await noteCache.getHygieneReport(req.sessionId!, {
+      dismissedPairs,
+      tier,
+      offset,
+      limit,
+    });
     res.status(200).json(report);
+  });
+
+  /**
+   * POST /api/organize/hygiene/dismiss
+   * Body: { noteIds: [idA, idB, ...] } or { pairs: [[idA, idB], ...] }
+   * Persists dismissed note pairs in the server preferences store so they never reappear as duplicates.
+   */
+  router.post('/hygiene/dismiss', async (req, res) => {
+    if (!req.preferencesStore) {
+      throw new Error('PreferencesStore not configured');
+    }
+    const pairs = parseDismissPairs(req.body);
+    const ownerKey = noteCache.getOwnerKey(req.sessionId!);
+    const dismissedPairs = await req.preferencesStore.dismissDuplicatePairs(ownerKey, pairs);
+    res.status(200).json({ dismissedCount: pairs.length, dismissedPairs });
+  });
+
+  /**
+   * POST /api/organize/hygiene/undismiss
+   * Body: { noteIds: [idA, idB, ...] } or { pairs: [[idA, idB], ...] }
+   * Restores previously dismissed note pairs (used by Undo).
+   */
+  router.post('/hygiene/undismiss', async (req, res) => {
+    if (!req.preferencesStore) {
+      throw new Error('PreferencesStore not configured');
+    }
+    const pairs = parseDismissPairs(req.body);
+    const ownerKey = noteCache.getOwnerKey(req.sessionId!);
+    const dismissedPairs = await req.preferencesStore.undismissDuplicatePairs(ownerKey, pairs);
+    res.status(200).json({ restoredCount: pairs.length, dismissedPairs });
+  });
+
+  /**
+   * POST /api/organize/hygiene/resolve
+   * Body: { keepNoteId: string, trashNoteIds: string[], mergeTags?: boolean }
+   * Optionally merges tags from trashed copies onto the keeper, then moves the copies to Trash via the existing batch write path.
+   */
+  router.post('/hygiene/resolve', async (req, res) => {
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+      res.status(400).json({ error: 'Request body must be a JSON object' });
+      return;
+    }
+    const { keepNoteId, trashNoteIds, mergeTags } = req.body as {
+      keepNoteId?: unknown;
+      trashNoteIds?: unknown;
+      mergeTags?: unknown;
+    };
+    if (typeof keepNoteId !== 'string') {
+      res.status(400).json({ error: 'keepNoteId is required' });
+      return;
+    }
+    const validKeeperId = assertValidId(keepNoteId, 'keepNoteId');
+    if (!Array.isArray(trashNoteIds) || trashNoteIds.length === 0) {
+      res.status(400).json({ error: 'trashNoteIds must be a non-empty array' });
+      return;
+    }
+    if (trashNoteIds.length > 500) {
+      res.status(400).json({ error: 'trashNoteIds exceeds maximum of 500 notes' });
+      return;
+    }
+    const uniqueTrashIds = Array.from(
+      new Set(
+        trashNoteIds.map((id) => {
+          if (typeof id !== 'string') throw new WriteValidationError('trashNoteIds must contain strings only', 400);
+          return assertValidId(id, 'trashNoteId');
+        })
+      )
+    );
+    if (uniqueTrashIds.includes(validKeeperId)) {
+      res.status(400).json({ error: 'keepNoteId cannot also appear in trashNoteIds' });
+      return;
+    }
+    if (mergeTags !== undefined && typeof mergeTags !== 'boolean') {
+      res.status(400).json({ error: 'mergeTags must be a boolean' });
+      return;
+    }
+
+    // Never trash the copies when the note to keep is gone or already in the trash (e.g. changed in another tab)
+    const keeper = await noteCache.getNote(req.sessionId!, validKeeperId);
+    if (!keeper || keeper.deletedTime > 0) {
+      res.status(409).json({ error: 'The note to keep no longer exists or is in the trash; refresh and try again' });
+      return;
+    }
+
+    const shouldMergeTags = mergeTags !== false;
+    let mergedTags: string[] = [];
+
+    if (shouldMergeTags) {
+      const entry = await noteCache.getEntry(req.sessionId!);
+      const trashSet = new Set(uniqueTrashIds);
+      const keeperTagIds = new Set<string>();
+      const sourceTagIds = new Set<string>();
+      for (const link of entry.noteTags) {
+        if (link.noteId === validKeeperId) keeperTagIds.add(link.tagId);
+        else if (trashSet.has(link.noteId)) sourceTagIds.add(link.tagId);
+      }
+      const tagsToMerge: string[] = [];
+      const seenLower = new Set<string>();
+      for (const tagId of keeperTagIds) {
+        const tag = entry.tags.get(tagId);
+        if (tag && tag.properties.encryption_applied !== '1' && tag.title.trim()) {
+          seenLower.add(tag.title.trim().toLowerCase());
+        }
+      }
+      for (const tagId of sourceTagIds) {
+        if (keeperTagIds.has(tagId)) continue;
+        const tag = entry.tags.get(tagId);
+        if (!tag || tag.deletedTime > 0 || tag.properties.encryption_applied === '1') continue;
+        const cleanTitle = tag.title.trim();
+        if (!cleanTitle) continue;
+        const lower = cleanTitle.toLowerCase();
+        if (seenLower.has(lower)) continue;
+        seenLower.add(lower);
+        tagsToMerge.push(cleanTitle);
+      }
+
+      if (tagsToMerge.length > 0) {
+        const mergeResults = await noteWriter.batchUpdateNotes(req.sessionId!, {
+          items: [{ id: validKeeperId, addTags: tagsToMerge }],
+        });
+        const keeperResult = mergeResults[0];
+        if (!keeperResult || keeperResult.status !== 'ok') {
+          res.status(keeperResult?.status === 'conflict' ? 409 : 422).json({
+            error: keeperResult?.error || 'Could not merge tags onto kept note',
+          });
+          return;
+        }
+        mergedTags = keeperResult.addedTags ?? [];
+      }
+    }
+
+    const results = await noteWriter.batchUpdateNotes(req.sessionId!, {
+      items: uniqueTrashIds.map((id) => ({ id })),
+      trash: true,
+    });
+    const trashedNoteIds = results.filter((r) => r.status === 'ok').map((r) => r.id);
+
+    res.status(200).json({
+      keepNoteId: validKeeperId,
+      trashedNoteIds,
+      mergedTags,
+      results,
+    });
   });
 
   /**
