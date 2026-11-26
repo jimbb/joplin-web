@@ -276,6 +276,8 @@ test.describe("workspace features", () => {
     await signIn(page);
     await page.evaluate(() => localStorage.setItem("joplin-editor-mode", "edit"));
     await page.getByRole("button", { name: /^Book Notes: Deep Work/ }).click();
+    // Until it shows, Edit belongs to the note opened first (busy rendering PDF thumbnails)
+    await expect(page.getByRole("heading", { level: 1, name: "Book Notes: Deep Work" })).toBeVisible();
     await page.getByRole("button", { name: "Edit", exact: true }).click();
     await page.getByRole("button", { name: "Rich", exact: true }).click();
 
