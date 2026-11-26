@@ -131,7 +131,7 @@ export function createApp(
   // Specific Rate Limiting for Auth
   const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 30, // Limit login attempts
+    max: config.authRateLimitMax, // Login attempts per client address and window (AUTH_RATE_LIMIT_MAX, default 30)
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'Too many authentication attempts, please try again later.' },

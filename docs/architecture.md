@@ -46,7 +46,7 @@ The client is installable as a Progressive Web App: `client/public/manifest.webm
 | `middleware/origin-check.ts` | CSRF protection for POST/PUT/DELETE: the `Origin` header must match the request's `Host` (or `X-Forwarded-Host` only when `TRUST_PROXY` trusts the peer), `PUBLIC_URL`, `CORS_ORIGIN`, or an allowlisted `chrome-extension://<id>` from `CLIPPER_EXTENSION_IDS`. Requests without `Origin` (non-browser clients and webhooks) pass only when they carry no auth cookies (`hasAuthCookies`, including pending and trusted-device cookies). |
 | `middleware/request-logger.ts` | morgan access log with sensitive query parameters (`auth`, `token`, `password`, …) redacted. |
 | `middleware/error-handler.ts` | Maps errors to JSON responses; 5xx responses carry a generic message only (details are logged). |
-| `config.ts` | Reads the environment (`JOPLIN_SERVER_URL`, `PUBLIC_URL`, `CACHE_DIR`, `REQUIRE_2FA`, `TRUST_PROXY`, `ALLOW_REMOTE_IMAGES`, `COOKIE_SECURE`, `RATE_LIMIT_MAX`, `AI_*`, `AI_TRANSCRIBE_MODEL`, `OCR_SERVICE_*`, `OCR_INLINE_WAIT_MS`, `SCAN_STATUS_EMAILS`, `SCAN_STATUS_FAKE`, `EMAIL_INGEST_*`, …); exits at startup on invalid values, missing `JOPLIN_SERVER_URL`, or `REQUIRE_2FA=true` without `CACHE_DIR`. Resolves WebAuthn RP ID/origin from `PUBLIC_URL` (or `http://localhost` outside production). |
+| `config.ts` | Reads the environment (`JOPLIN_SERVER_URL`, `PUBLIC_URL`, `CACHE_DIR`, `REQUIRE_2FA`, `TRUST_PROXY`, `ALLOW_REMOTE_IMAGES`, `COOKIE_SECURE`, `RATE_LIMIT_MAX`, `AUTH_RATE_LIMIT_MAX`, `AI_*`, `AI_TRANSCRIBE_MODEL`, `OCR_SERVICE_*`, `OCR_INLINE_WAIT_MS`, `SCAN_STATUS_EMAILS`, `SCAN_STATUS_FAKE`, `EMAIL_INGEST_*`, …); exits at startup on invalid values, missing `JOPLIN_SERVER_URL`, or `REQUIRE_2FA=true` without `CACHE_DIR`. Resolves WebAuthn RP ID/origin from `PUBLIC_URL` (or `http://localhost` outside production). |
 | `routes/*.ts` | Thin Express 5 routers per resource (`auth.ts`, `two-factor.ts`, `preferences.ts`, `notes.ts`, `tasks.ts`, `organize.ts`, `ask.ts`, `clip.ts`, …). Handlers are plain `async` functions: Express 5 forwards rejected promises to the error handler, so they have no try/catch. |
 
 ## Joplin sync protocol
@@ -245,7 +245,7 @@ Filter values may be quoted; tag and notebook names must match the whole title, 
 ### Sessions
 
 - The browser never sees the token: it lives in the httpOnly cookie. On startup the client calls `/api/auth/check`; only the email address (for display) is kept in `localStorage`.
-- Rate limits per client address and 15 minutes: `RATE_LIMIT_MAX` requests on `/api/` (default 1000), 30 login attempts on `/api/auth/login`, and 30 mutating (`POST`/`PUT`/`DELETE`) requests on `/api/auth/2fa`. A 429 carries `Retry-After`.
+- Rate limits per client address and 15 minutes: `RATE_LIMIT_MAX` requests on `/api/` (default 1000), `AUTH_RATE_LIMIT_MAX` login attempts on `/api/auth/login` (default 30), and 30 mutating (`POST`/`PUT`/`DELETE`) requests on `/api/auth/2fa`. A 429 carries `Retry-After`.
 - `TRUST_PROXY` sets Express' `trust proxy`, so `req.ip` (rate limits, logs) and `req.secure` (cookie `Secure` flag) reflect the client behind a reverse proxy. Off by default, so a directly exposed instance can't be fooled by a forged `X-Forwarded-For`.
 - Logout (client): unmounts the notes UI so open editors flush their changes, waits for pending writes, calls `/api/auth/logout`, then clears the TanStack Query cache and revokes cached attachment URLs. Login also clears the query cache.
 

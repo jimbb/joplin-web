@@ -32,6 +32,8 @@ export interface AppConfig {
   gitSha: string | null;
   /** Requests per client address and 15 minutes allowed on /api/ (RATE_LIMIT_MAX) */
   rateLimitMax: number;
+  /** Login attempts per client address and 15 minutes (AUTH_RATE_LIMIT_MAX) */
+  authRateLimitMax: number;
   /** Base URL of an OpenAI-compatible Chat Completions endpoint (AI_BASE_URL), null when unset */
   aiBaseUrl: string | null;
   /** Optional API key sent as Bearer token to AI_BASE_URL (AI_API_KEY) */
@@ -259,6 +261,14 @@ export function parseRateLimitMax(raw: string | undefined): number {
   return parsePositiveInt('RATE_LIMIT_MAX', raw, 1000);
 }
 
+/**
+ * Parses AUTH_RATE_LIMIT_MAX, the login attempts allowed per client address and 15 minutes.
+ * Unset means 30; anything but a positive whole number is rejected.
+ */
+export function parseAuthRateLimitMax(raw: string | undefined): number {
+  return parsePositiveInt('AUTH_RATE_LIMIT_MAX', raw, 30);
+}
+
 function parseCacheDir(raw: string | undefined): string | null {
   const value = raw?.trim();
   return value ? path.resolve(value) : null;
@@ -371,6 +381,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     appVersion: parseAppVersion(env.APP_VERSION),
     gitSha: parseGitSha(env.GIT_SHA),
     rateLimitMax: parseRateLimitMax(env.RATE_LIMIT_MAX),
+    authRateLimitMax: parseAuthRateLimitMax(env.AUTH_RATE_LIMIT_MAX),
     aiBaseUrl,
     aiApiKey,
     aiModel,

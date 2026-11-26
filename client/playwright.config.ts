@@ -43,6 +43,8 @@ export default defineConfig({
         // Every test talks to this one server from one address: the default 1000 requests per
         // 15 minutes runs out before the last tests of a full run
         RATE_LIMIT_MAX: "100000",
+        // A full run signs in about 30 times, the default login limit, so a single retry used to lock out the rest
+        AUTH_RATE_LIMIT_MAX: "1000",
       },
       url: `http://localhost:${API_PORT}/api/health`,
       reuseExistingServer: !process.env.CI,

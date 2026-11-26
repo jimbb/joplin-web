@@ -1033,11 +1033,14 @@ describe('security', () => {
     assert.equal(loadConfig({ ...base, GIT_SHA: 'not-a-sha' }).gitSha, null);
   });
 
-  test('reads RATE_LIMIT_MAX', async () => {
+  test('reads RATE_LIMIT_MAX and AUTH_RATE_LIMIT_MAX', async () => {
     const { loadConfig, ConfigError } = await import('../src/config.js');
     const base = { JOPLIN_SERVER_URL: 'https://notes.example.com' };
     assert.equal(loadConfig(base).rateLimitMax, 1000);
     assert.equal(loadConfig({ ...base, RATE_LIMIT_MAX: ' 5000 ' }).rateLimitMax, 5000);
+    assert.equal(loadConfig(base).authRateLimitMax, 30);
+    assert.equal(loadConfig({ ...base, AUTH_RATE_LIMIT_MAX: '1000' }).authRateLimitMax, 1000);
+    assert.throws(() => loadConfig({ ...base, AUTH_RATE_LIMIT_MAX: '0' }), ConfigError);
     for (const bad of ['0', '-1', '1.5', 'lots']) {
       assert.throws(() => loadConfig({ ...base, RATE_LIMIT_MAX: bad }), ConfigError);
     }
