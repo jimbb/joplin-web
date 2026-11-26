@@ -365,18 +365,91 @@ export interface CompiledSearchTerm {
   text: RegExp;
   /** Whitespace-tolerant case-insensitive matcher for raw OCR text (`\s+` between words) */
   ocr: RegExp;
+  /** Global copies of `text` and `ocr` for `scanTermOccurrences` */
+  textAll: RegExp;
+  ocrAll: RegExp;
+  /**
+   * Whether the term starts / ends with a Latin letter or digit, so that a match is only a whole
+   * word when no letter or digit touches it on that side. Chinese and Japanese text has no spaces
+   * between words, and punctuation ("c++", "#42") is its own edge, so those sides aren't checked.
+   */
+  wordStart: boolean;
+  wordEnd: boolean;
 }
+
+const WORD_EDGE_RE = /[A-Za-z0-9]/;
 
 /**
  * Compiles a search term once per query into case-insensitive Unicode regexes for matching raw
  * note titles/bodies (literal spaces) and raw OCR text (spaces match any whitespace run `\s+`,
- * equivalent to matching `normalizeOcrText` output).
+ * equivalent to matching `normalizeOcrText` output), plus what ranking needs to count occurrences.
  */
 export function compileSearchTerm(term: string): CompiledSearchTerm {
   const escaped = term.replace(REGEX_META_RE, '\\$&');
   const text = new RegExp(escaped, 'iu');
-  const ocr = /\s/.test(term) ? new RegExp(escaped.replace(/\s+/g, '\\s+'), 'iu') : text;
-  return { term, text, ocr };
+  const textAll = new RegExp(escaped, 'giu');
+  const spaced = /\s/.test(term);
+  const ocrSource = spaced ? escaped.replace(/\s+/g, '\\s+') : escaped;
+  return {
+    term,
+    text,
+    ocr: spaced ? new RegExp(ocrSource, 'iu') : text,
+    textAll,
+    ocrAll: spaced ? new RegExp(ocrSource, 'giu') : textAll,
+    wordStart: WORD_EDGE_RE.test(term[0] ?? ''),
+    wordEnd: WORD_EDGE_RE.test(term[term.length - 1] ?? ''),
+  };
+}
+
+const isLatinLetterOrDigit = (code: number): boolean =>
+  (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+
+/** How often a term occurs in a text, as counted by `scanTermOccurrences` */
+export interface TermOccurrences {
+  count: number;
+  /** At least one counted occurrence is a whole word, not part of a longer one ("tax" in "syntax") */
+  wholeWord: boolean;
+}
+
+/**
+ * Counts the first `cap` occurrences of a term within the first `window` characters of `text`
+ * (`globalRe` is the term's `textAll` or `ocrAll`) and tells whether any of them is a whole word.
+ * Both bounds keep ranking cheap on huge OCR texts, web clips and very common words.
+ */
+export function scanTermOccurrences(
+  globalRe: RegExp,
+  term: CompiledSearchTerm,
+  text: string,
+  cap: number,
+  window: number
+): TermOccurrences {
+  const result: TermOccurrences = { count: 0, wholeWord: false };
+  if (!text) return result;
+  const scanned = text.length > window ? text.slice(0, window) : text;
+  // Without whitespace a match is as long as the term (case folding keeps UTF-16 lengths), so the
+  // cheaper test() gives its position; a phrase in OCR text can span any whitespace run
+  const fixedLength = globalRe.source.includes('\\s+') ? -1 : term.term.length;
+  globalRe.lastIndex = 0;
+  while (result.count < cap) {
+    let start: number;
+    let end: number;
+    if (fixedLength >= 0) {
+      if (!globalRe.test(scanned)) break;
+      end = globalRe.lastIndex;
+      start = end - fixedLength;
+    } else {
+      const match = globalRe.exec(scanned);
+      if (!match) break;
+      start = match.index;
+      end = start + match[0].length;
+    }
+    result.count++;
+    result.wholeWord ||=
+      !(term.wordStart && start > 0 && isLatinLetterOrDigit(text.charCodeAt(start - 1))) &&
+      !(term.wordEnd && end < text.length && isLatinLetterOrDigit(text.charCodeAt(end)));
+  }
+  globalRe.lastIndex = 0;
+  return result;
 }
 
 /**

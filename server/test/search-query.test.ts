@@ -4,6 +4,7 @@ import {
   buildOcrSnippet,
   buildRawOcrSnippet,
   compileSearchTerm,
+  scanTermOccurrences,
   extractLinkedResourceIds,
   isEmptySearchQuery,
   matchesDateFilters,
@@ -184,6 +185,34 @@ describe('compileSearchTerm', () => {
     const single = compileSearchTerm('invoice');
     assert.equal(single.text, single.ocr);
     assert.equal(single.text.test('INVOICE'), true);
+  });
+
+  test('counts occurrences and tells whole words from parts of longer Latin words', () => {
+    const scan = (term: string, text: string, cap = 50, window = 1000) => {
+      const compiled = compileSearchTerm(term);
+      return scanTermOccurrences(compiled.ocrAll, compiled, text, cap, window);
+    };
+    assert.deepEqual(scan('tax', 'Tax return (tax) and TAX'), { count: 3, wholeWord: true });
+    assert.deepEqual(scan('tax', 'syntax, taxi, 2024tax'), { count: 3, wholeWord: false }, 'digits are part of the word');
+    assert.deepEqual(scan('tax', '稅務tax'), { count: 1, wholeWord: true }, 'CJK next to it is a word edge');
+    assert.deepEqual(scan('渣打', '渣打銀行月結單 渣打'), { count: 2, wholeWord: true }, 'CJK terms have no edges to check');
+    assert.deepEqual(scan('c++', 'C++11 notes'), { count: 1, wholeWord: true }, 'a punctuation end is its own edge');
+    assert.deepEqual(scan('c++', 'abc++'), { count: 1, wholeWord: false });
+    assert.deepEqual(scan('hsbc statement', 'HSBC\n Statement 2024, HSBC statements'), { count: 2, wholeWord: true });
+    assert.deepEqual(scan('hsbc statement', 'HSBC\nStatements'), { count: 1, wholeWord: false });
+    assert.deepEqual(scan('invoice', ''), { count: 0, wholeWord: false });
+  });
+
+  test('stops at the cap and the window, and leaves the shared regex reset', () => {
+    const ba = compileSearchTerm('ba');
+    const text = `bab bab ba ${'ba '.repeat(10)}`;
+    assert.deepEqual(scanTermOccurrences(ba.textAll, ba, text, 5, 10_000), { count: 5, wholeWord: true });
+    assert.deepEqual(scanTermOccurrences(ba.textAll, ba, text, 2, 10_000), { count: 2, wholeWord: false });
+    assert.deepEqual(scanTermOccurrences(ba.textAll, ba, text, 50, 8), { count: 2, wholeWord: false });
+    // The character after the window still decides whether the last counted match is whole
+    const tax = compileSearchTerm('tax');
+    assert.deepEqual(scanTermOccurrences(tax.textAll, tax, 'ab taxi', 50, 6), { count: 1, wholeWord: false });
+    assert.equal(ba.textAll.lastIndex, 0);
   });
 });
 

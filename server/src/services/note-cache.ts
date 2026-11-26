@@ -12,6 +12,7 @@ import {
   matchesDateFilters,
   matchesNamePattern,
   parseSearchQuery,
+  scanTermOccurrences,
   type CompiledSearchTerm,
 } from './search-query.js';
 import { extractInlineTasks } from './inline-tasks.js';
@@ -148,6 +149,7 @@ interface NoteMemo {
 
 const EMPTY_RESOURCE_IDS: readonly string[] = Object.freeze([]);
 const noteMemos = new WeakMap<RawJoplinItem, NoteMemo>();
+const averageNoteLengths = new WeakMap<CacheEntry, { version: number; value: number }>();
 
 function noteMemoOf(note: RawJoplinItem): NoteMemo {
   const body = note.body || '';
@@ -157,6 +159,23 @@ function noteMemoOf(note: RawJoplinItem): NoteMemo {
     noteMemos.set(note, memo);
   }
   return memo;
+}
+
+/** BM25 term-frequency saturation and length normalization used to order equally ranked search hits */
+const BM25_K1 = 1.2;
+const BM25_B = 0.75;
+/** Occurrences counted per text and term; more barely changes the BM25 value */
+const MATCH_COUNT_CAP = 10;
+/** Characters of each title, body or OCR text scanned for ranking (and counted as its length) */
+const RANKING_SCAN_WINDOW = 5_000;
+/** Weight of a search term by where it matched, x10 to stay an integer: [whole word, inside a longer word] */
+const TERM_WEIGHT = { title: [1100, 330], body: [100, 30], attachment: [10, 3] } as const;
+
+/** Length of a note for BM25, counting each text only as far as ranking scans it */
+function rankedLength(title: string, body: string, ocrs: readonly string[]): number {
+  let length = Math.min(title.length, RANKING_SCAN_WINDOW) + Math.min(body.length, RANKING_SCAN_WINDOW);
+  for (const ocr of ocrs) length += Math.min(ocr.length, RANKING_SCAN_WINDOW);
+  return length;
 }
 
 /** Memoized linked resource IDs for a note, invalidated automatically if `note.body` changes */
@@ -1249,7 +1268,11 @@ export class NoteCacheService {
    *
    * @param sessionId Active session ID
    * @param query Search query string
-   * @returns Matching SearchResults sorted by relevance and updatedTime
+   * Ranking: each term weighs by the best place it matched (title, body, attachment OCR) and less
+   * when it is only part of a longer word; equal notes are ordered by BM25 term frequency, then
+   * by `updatedTime`.
+   *
+   * @returns Matching SearchResults, best match first
    */
   public async searchNotes(sessionId: string, query: string): Promise<SearchResult[]> {
     const parsed = parseSearchQuery(query);
@@ -1290,7 +1313,9 @@ export class NoteCacheService {
       excludedMatchers.length > 0 ||
       termMatchers.length > 0;
 
-    const results: Array<SearchResult & { relevanceScore: number }> = [];
+    const averageLength = termMatchers.length > 0 ? this.averageNoteLength(entry) : 1;
+
+    const results: Array<SearchResult & { relevanceScore: number; matchStrength: number }> = [];
 
     for (const note of entry.notes.values()) {
       // Exclude trashed notes and conflict copies from search
@@ -1355,20 +1380,24 @@ export class NoteCacheService {
       }
 
       let titleHits = 0;
-      let bodyHits = 0;
       let matchIdx = -1;
       let matchLength = 0;
       let matchTermIdx = -1;
       const unmatchedMatchers: CompiledSearchTerm[] = [];
+      // Where each term matched first: title, else body, else (when neither) attachment OCR
+      const termInTitle: boolean[] = [];
+      const termInBody: boolean[] = [];
 
       for (let i = 0; i < termMatchers.length; i++) {
         const m = termMatchers[i];
-        if (m.text.test(title)) {
+        termInTitle[i] = m.text.test(title);
+        termInBody[i] = false;
+        if (termInTitle[i]) {
           titleHits++;
         } else {
           const bm = m.text.exec(body);
           if (bm) {
-            bodyHits++;
+            termInBody[i] = true;
             if (matchIdx === -1 || bm.index < matchIdx) {
               matchIdx = bm.index;
               matchLength = bm[0].length;
@@ -1386,7 +1415,8 @@ export class NoteCacheService {
 
       let excludedByAttachment = false;
       const attachmentOcrs: string[] = [];
-      if (!encrypted && (unmatchedMatchers.length > 0 || excludedMatchers.length > 0)) {
+      const ocrGathered = !encrypted && (unmatchedMatchers.length > 0 || excludedMatchers.length > 0);
+      if (ocrGathered) {
         for (const resId of linkedResourceIds) {
           const ocrText = entry.resources.get(resId)?.ocrText;
           if (!ocrText) continue;
@@ -1414,7 +1444,6 @@ export class NoteCacheService {
           if (!m.text.test(title)) continue;
           const bm = m.text.exec(body);
           if (bm) {
-            bodyHits++;
             if (matchIdx === -1 || bm.index < matchIdx || (bm.index === matchIdx && i < matchTermIdx)) {
               matchIdx = bm.index;
               matchLength = bm[0].length;
@@ -1447,20 +1476,37 @@ export class NoteCacheService {
         }
       }
 
-      // Title matches receive highest priority, followed by body, then attachment OCR
-      let attachmentHits = 0;
-      if (attachmentOcrs.length > 0) {
-        if (unmatchedMatchers.length === termMatchers.length) {
-          attachmentHits = termMatchers.length;
-        } else {
-          for (const m of termMatchers) {
-            if (unmatchedMatchers.includes(m) || attachmentOcrs.some((ocr) => m.ocr.test(ocr))) {
-              attachmentHits++;
-            }
+      // Each term counts by the best place it matched (title, then body, then attachment OCR), less
+      // where it only appears inside a longer word ("tax" in "syntax"). Notes that tie are ordered
+      // by how often they mention the terms for their length (BM25), then newest first.
+      let relevanceScore = 0;
+      let matchStrength = 0;
+      if (termMatchers.length > 0) {
+        const ocrs = ocrGathered ? attachmentOcrs : this.linkedOcrTexts(entry, linkedResourceIds);
+        const lengthNorm = BM25_K1 * (1 - BM25_B + (BM25_B * rankedLength(title, body, ocrs)) / averageLength);
+        for (let i = 0; i < termMatchers.length; i++) {
+          const m = termMatchers[i];
+          const scan = (re: RegExp, text: string) =>
+            scanTermOccurrences(re, m, text, MATCH_COUNT_CAP, RANKING_SCAN_WINDOW);
+          const inTitleText = scan(m.textAll, title);
+          const inBodyText = scan(m.textAll, body);
+          let tf = inTitleText.count * 3 + inBodyText.count;
+          let ocrWholeWord = false;
+          for (const ocr of ocrs) {
+            const inOcr = scan(m.ocrAll, ocr);
+            tf += inOcr.count;
+            ocrWholeWord ||= inOcr.wholeWord;
           }
+          const [whole, partial] = termInTitle[i]
+            ? TERM_WEIGHT.title
+            : termInBody[i]
+              ? TERM_WEIGHT.body
+              : TERM_WEIGHT.attachment;
+          const isWhole = termInTitle[i] ? inTitleText.wholeWord : termInBody[i] ? inBodyText.wholeWord : ocrWholeWord;
+          relevanceScore += isWhole ? whole : partial;
+          matchStrength += tf / (tf + lengthNorm);
         }
       }
-      const relevanceScore = titleHits * 100 + bodyHits * 10 + attachmentHits;
 
       const matches: SearchResult['matches'] = {
         inTitle,
@@ -1487,18 +1533,47 @@ export class NoteCacheService {
         ...(tagIds && tagIds.length > 0 ? { tagIds } : {}),
         matches,
         relevanceScore,
+        matchStrength,
       });
     }
 
-    // Sort by relevance score descending, then by updatedTime descending
-    results.sort((a, b) => {
-      if (b.relevanceScore !== a.relevanceScore) {
-        return b.relevanceScore - a.relevanceScore;
-      }
-      return b.updatedTime - a.updatedTime;
-    });
+    results.sort(
+      (a, b) =>
+        b.relevanceScore - a.relevanceScore || b.matchStrength - a.matchStrength || b.updatedTime - a.updatedTime
+    );
 
-    return results.map(({ relevanceScore, ...item }) => item);
+    return results.map(({ relevanceScore, matchStrength, ...item }) => item);
+  }
+
+  /** OCR texts (`ocr_status: 2`) of the given linked resources, in link order */
+  private linkedOcrTexts(entry: CacheEntry, resourceIds: readonly string[]): string[] {
+    const texts: string[] = [];
+    for (const id of resourceIds) {
+      const ocrText = entry.resources.get(id)?.ocrText;
+      if (ocrText) texts.push(ocrText);
+    }
+    return texts;
+  }
+
+  /**
+   * Average length of an active note's title, body and attachment OCR text, the BM25 reference
+   * length for search ranking. Computed once per cache `contentVersion`.
+   */
+  private averageNoteLength(entry: CacheEntry): number {
+    const version = entry.contentVersion ?? 0;
+    const memo = averageNoteLengths.get(entry);
+    if (memo && memo.version === version) return memo.value;
+    let total = 0;
+    let count = 0;
+    for (const note of entry.notes.values()) {
+      if (isConflictNote(note) || (note.deletedTime && note.deletedTime > 0)) continue;
+      const ocrs = isEncrypted(note) ? [] : this.linkedOcrTexts(entry, noteLinkedResourceIds(note));
+      total += rankedLength(note.title || '', note.body || '', ocrs);
+      count++;
+    }
+    const value = count > 0 ? Math.max(1, total / count) : 1;
+    averageNoteLengths.set(entry, { version, value });
+    return value;
   }
 
   /**
